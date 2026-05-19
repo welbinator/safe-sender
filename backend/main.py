@@ -25,7 +25,6 @@ Internal (SMTP service only, not exposed via nginx):
 """
 import hashlib
 import os
-import socket
 from typing import Optional
 
 import asyncpg
@@ -35,30 +34,6 @@ from pydantic import BaseModel, field_validator
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://sendersafety:changeme@postgres:5432/sendersafety"
 )
-
-# ---------------------------------------------------------------------------
-# Pre-resolve the DB hostname at module load time (before asyncio starts).
-# On WSL2, Docker's embedded DNS (127.0.0.11) is unreachable from within an
-# asyncio event loop's thread-pool executor. Resolving synchronously here,
-# before the event loop is created, works around this kernel bug.
-# ---------------------------------------------------------------------------
-def _resolve_db_url(url: str) -> str:
-    from urllib.parse import urlparse, urlunparse
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if hostname:
-            ip = socket.gethostbyname(hostname)
-            # Reconstruct netloc with IP instead of hostname
-            netloc = parsed.netloc.replace(f"@{hostname}", f"@{ip}", 1)
-            resolved = urlunparse(parsed._replace(netloc=netloc))
-            print(f"[startup] Resolved DB host {hostname!r} -> {ip}")
-            return resolved
-    except Exception as e:
-        print(f"[startup] Could not resolve DB host: {e}")
-    return url
-
-_RESOLVED_DB_URL = _resolve_db_url(DATABASE_URL)
 
 app = FastAPI(title="Sender Safety API", version="0.3.0")
 # ---------------------------------------------------------------------------
@@ -76,7 +51,7 @@ async def startup():
     for attempt in range(10):
         try:
             _pool = await asyncpg.create_pool(
-                _RESOLVED_DB_URL,
+                DATABASE_URL,
                 min_size=2,
                 max_size=10,
                 ssl=False,

@@ -7,4 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "asyncio"]
+COPY entrypoint.sh /entrypoint.sh
+COPY entrypoint.py /entrypoint.py
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["python3", "/entrypoint.py"]
