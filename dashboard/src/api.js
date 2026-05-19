@@ -31,3 +31,9 @@ export const createRule = (data) => api.post('/rules', data);
 export const updateRule = (id, data) => api.put(`/rules/${id}`, data);
 export const deleteRule = (id) => api.delete(`/rules/${id}`);
 export const getLogs = (params) => api.get('/logs', { params });
+
+// Sprint 5 — onboarding
+export const verifyDomainInit = () => api.post('/customers/verify-domain/init');
+export const verifyDomainCheck = () => api.post('/customers/verify-domain/check');
+export const testConnection = () => api.post('/customers/test-connection');
+

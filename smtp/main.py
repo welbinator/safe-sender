@@ -203,6 +203,30 @@ class SafeSenderHandler:
         domain = _extract_domain(mail_from)
         logger.info("Incoming email from domain=%s to=%s", domain, rcpt_tos)
 
+        # --- Test connection emails: sendersafety-test@<domain> ---
+        # These are sent by our own backend to verify the SMTP path works.
+        # Skip rule matching, log as allowed, accept without forwarding via SES.
+        local_part = mail_from.strip("<>").split("@")[0].lower()
+        if local_part == "sendersafety-test":
+            try:
+                data = await _fetch_rules(domain)
+            except Exception:
+                data = None
+            if data:
+                recipient = rcpt_tos[0] if rcpt_tos else ""
+                msg = email_lib.message_from_bytes(raw_content, policy=email_policy.default)
+                subject_hash = hashlib.sha256(str(msg.get("Subject", "")).encode()).hexdigest()
+                await _log_scan(
+                    customer_id=data["customer_id"],
+                    sender=mail_from,
+                    recipient=recipient,
+                    subject_hash=subject_hash,
+                    matched_rule_id=None,
+                    outcome="allowed",
+                )
+                logger.info("Test connection email accepted for domain=%s", domain)
+            return "250 OK"
+
         # --- 1. Look up customer + rules ---
         try:
             data = await _fetch_rules(domain)
