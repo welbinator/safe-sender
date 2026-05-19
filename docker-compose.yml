@@ -28,6 +28,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-changeme}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      ALLOW_TEST_TOKENS: ${ALLOW_TEST_TOKENS:-0}
 
   smtp:
     build: ./smtp

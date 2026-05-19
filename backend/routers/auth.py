@@ -45,7 +45,13 @@ async def auth_google(
     """
     Verify Google ID token, upsert customer, return session JWT.
     """
-    claims = await verify_google_id_token(body.id_token)
+    # Test-mode bypass: ALLOW_TEST_TOKENS=1 lets tests pass fake claims as
+    # JSON-encoded id_token prefixed with "test:".  Never enable in prod.
+    if os.environ.get("ALLOW_TEST_TOKENS") == "1" and body.id_token.startswith("test:"):
+        import json as _json
+        claims = _json.loads(body.id_token[5:])
+    else:
+        claims = await verify_google_id_token(body.id_token)
 
     google_sub = claims["sub"]
     email = claims["email"]
