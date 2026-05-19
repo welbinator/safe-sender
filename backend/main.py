@@ -136,10 +136,12 @@ async def get_rules(domain: str):
     pool = get_pool()
     async with pool.acquire() as conn:
         customer = await conn.fetchrow(
-            "SELECT id FROM customers WHERE domain = $1", domain.lower()
+            "SELECT id, domain_verified FROM customers WHERE domain = $1", domain.lower()
         )
         if not customer:
             raise HTTPException(status_code=404, detail="Domain not registered")
+        if not customer["domain_verified"]:
+            raise HTTPException(status_code=403, detail="Domain not verified")
 
         customer_id = customer["id"]
         rows = await conn.fetch(
@@ -205,3 +207,21 @@ async def create_scan_log(body: ScanLogRequest):
             body.outcome,
         )
     return {"status": "logged"}
+
+
+# ---------------------------------------------------------------------------
+# GET /internal/suppressed/{email}
+# ---------------------------------------------------------------------------
+
+@app.get("/internal/suppressed/{email}")
+async def check_suppressed(email: str):
+    """Returns 200 if address is suppressed, 404 if not."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT email FROM suppressed_addresses WHERE email = $1",
+            email.lower().strip(),
+        )
+    if row:
+        return {"suppressed": True}
+    raise HTTPException(status_code=404, detail="Not suppressed")

@@ -230,10 +230,24 @@ async def _fetch_rules(domain: str) -> dict | None:
     url = f"{BACKEND_URL}/internal/rules/{domain}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
-            if resp.status == 404:
+            if resp.status in (404, 403):
                 return None
             resp.raise_for_status()
             return await resp.json()
+
+
+async def _is_suppressed(recipient: str) -> bool:
+    """Check if a recipient address is in the suppression list."""
+    url = f"{BACKEND_URL}/internal/suppressed/{recipient.lower().strip('<>')}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    return True
+                return False
+    except Exception as exc:
+        logger.warning("Suppression check failed — allowing email", extra={"error": str(exc)})
+        return False
 
 
 async def _log_scan(
@@ -365,8 +379,8 @@ class SafeSenderHandler:
             return "451 4.3.0 Temporary server error"
 
         if data is None:
-            logger.info("Unknown domain rejected", extra={"domain": domain})
-            return "550 5.7.1 Domain not registered"
+            logger.info("Domain rejected", extra={"domain": domain, "reason": data})
+            return "550 5.7.1 Domain not registered or not verified"
 
         customer_id: str = data["customer_id"]
         rules: list[dict] = data.get("rules", [])
@@ -438,6 +452,20 @@ class SafeSenderHandler:
             return "550 5.7.1 Message rejected: policy violation"
 
         # Forward via SES
+        # --- Suppression check ---
+        for rcpt in rcpt_tos:
+            if await _is_suppressed(rcpt):
+                logger.info("Suppressed recipient — email blocked", extra={"recipient": rcpt, "from": mail_from})
+                await _log_scan(
+                    customer_id=customer_id,
+                    sender=mail_from,
+                    recipient=recipient,
+                    subject_hash=subject_hash,
+                    matched_rule_id=None,
+                    outcome="blocked",
+                )
+                return "550 5.1.8 Recipient address suppressed due to prior bounce or complaint"
+
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, _forward_via_ses, raw_content, mail_from, rcpt_tos)
