@@ -46,7 +46,18 @@ _pool: asyncpg.Pool | None = None
 @app.on_event("startup")
 async def startup():
     global _pool
-    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    import asyncio
+    last_err = None
+    for attempt in range(10):
+        try:
+            _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+            return
+        except Exception as e:
+            last_err = e
+            wait = 2 ** attempt
+            print(f"DB connect attempt {attempt + 1} failed: {e}. Retrying in {wait}s...")
+            await asyncio.sleep(wait)
+    raise RuntimeError(f"Could not connect to database after 10 attempts: {last_err}")
 
 
 @app.on_event("shutdown")
