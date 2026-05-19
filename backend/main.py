@@ -25,7 +25,6 @@ Internal (SMTP service only, not exposed via nginx):
 """
 import hashlib
 import os
-import re
 import socket
 from typing import Optional
 
@@ -44,15 +43,19 @@ DATABASE_URL = os.environ.get(
 # before the event loop is created, works around this kernel bug.
 # ---------------------------------------------------------------------------
 def _resolve_db_url(url: str) -> str:
-    match = re.search(r"@([^:/]+)(:\d+)?/", url)
-    if match:
-        hostname = match.group(1)
-        try:
+    from urllib.parse import urlparse, urlunparse
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if hostname:
             ip = socket.gethostbyname(hostname)
-            url = url.replace(f"@{hostname}", f"@{ip}", 1)
+            # Reconstruct netloc with IP instead of hostname
+            netloc = parsed.netloc.replace(f"@{hostname}", f"@{ip}", 1)
+            resolved = urlunparse(parsed._replace(netloc=netloc))
             print(f"[startup] Resolved DB host {hostname!r} -> {ip}")
-        except Exception as e:
-            print(f"[startup] Could not resolve DB host {hostname!r}: {e}")
+            return resolved
+    except Exception as e:
+        print(f"[startup] Could not resolve DB host: {e}")
     return url
 
 _RESOLVED_DB_URL = _resolve_db_url(DATABASE_URL)
