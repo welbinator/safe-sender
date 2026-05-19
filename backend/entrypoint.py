@@ -13,11 +13,12 @@ import sys
 from urllib.parse import urlparse, urlunparse
 
 
-def resolve_db_url(url: str) -> str:
+def resolve_db_url(url: str):
+    """Returns (resolved_url, hostname, ip). ip may equal hostname if resolution failed."""
     parsed = urlparse(url)
     hostname = parsed.hostname
     if not hostname:
-        return url
+        return url, None, None
     try:
         ip = socket.gethostbyname(hostname)
         at_idx = parsed.netloc.rfind("@")
@@ -27,16 +28,27 @@ def resolve_db_url(url: str) -> str:
             new_netloc = parsed.netloc[:at_idx + 1] + new_host_part
             resolved = urlunparse(parsed._replace(netloc=new_netloc))
             print(f"[entrypoint] Resolved {hostname} -> {ip}", flush=True)
-            return resolved
+            return resolved, hostname, ip
     except Exception as e:
         print(f"[entrypoint] WARNING: could not resolve {hostname}: {e}", file=sys.stderr, flush=True)
-    return url
+    return url, hostname, None
 
 
 if __name__ == "__main__":
     db_url = os.environ.get("DATABASE_URL", "")
     if db_url:
-        os.environ["DATABASE_URL"] = resolve_db_url(db_url)
+        resolved, hostname, ip = resolve_db_url(db_url)
+        os.environ["DATABASE_URL"] = resolved
+        # Write the IP into /etc/hosts so thread-pool DNS finds it without
+        # contacting Docker's embedded DNS (127.0.0.11), which is unreachable
+        # from executor threads on WSL2.
+        if hostname and ip and hostname != ip:
+            try:
+                with open("/etc/hosts", "a") as f:
+                    f.write(f"\n{ip} {hostname}\n")
+                print(f"[entrypoint] Added {ip} {hostname} to /etc/hosts", flush=True)
+            except Exception as e:
+                print(f"[entrypoint] Could not write /etc/hosts: {e}", file=sys.stderr, flush=True)
 
     # Ensure the app directory is in the Python path
     app_dir = "/app"
