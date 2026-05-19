@@ -104,12 +104,14 @@ def get_pool() -> asyncpg.Pool:
 # ---------------------------------------------------------------------------
 # Register Sprint 3 routers
 # ---------------------------------------------------------------------------
-from routers import auth, customers, logs, rules  # noqa: E402
+from routers import admin, auth, customers, logs, rules, webhooks  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(customers.router)
 app.include_router(rules.router)
 app.include_router(logs.router)
+app.include_router(webhooks.router)
+app.include_router(admin.router)
 
 
 # ---------------------------------------------------------------------------
