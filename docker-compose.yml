@@ -29,6 +29,12 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       ALLOW_TEST_TOKENS: ${ALLOW_TEST_TOKENS:-0}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      SES_FROM_EMAIL: ${SES_FROM_EMAIL:-noreply@sendersafety.com}
+      ADMIN_SECRET: ${ADMIN_SECRET:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
 
   smtp:
     build: ./smtp
