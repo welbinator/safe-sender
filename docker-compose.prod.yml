@@ -35,6 +35,18 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      BACKEND_URL: http://backend:8000
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      SES_SOURCE_ARN: ${SES_SOURCE_ARN}
+      AUTH_USERNAME: ${SMTP_AUTH_USERNAME}
+      AUTH_PASSWORD: ${SMTP_AUTH_PASSWORD}
+      TLS_CERT_PATH: ${TLS_CERT_PATH}
+      TLS_KEY_PATH: ${TLS_KEY_PATH}
+    volumes:
+      # Mount Let's Encrypt certs from host
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: always
 
   nginx:
