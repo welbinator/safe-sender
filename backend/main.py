@@ -46,6 +46,16 @@ _pool: asyncpg.Pool | None = None
 async def startup():
     global _pool
     import asyncio
+    import socket as _socket
+
+    loop = asyncio.get_running_loop()
+
+    # WSL2 Docker bug: thread-pool executor threads cannot call getaddrinfo.
+    # Patch loop.getaddrinfo to run synchronously in the event loop thread.
+    async def _sync_getaddrinfo(host, port, *args, **kwargs):
+        return _socket.getaddrinfo(host, port, *args, **kwargs)
+
+    loop.getaddrinfo = _sync_getaddrinfo
 
     last_err = None
     for attempt in range(10):
