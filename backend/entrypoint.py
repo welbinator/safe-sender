@@ -35,6 +35,24 @@ def resolve_db_url(url: str):
 
 
 if __name__ == "__main__":
+    import time
+
+    # Wait until network is fully up (IP is assigned in the container).
+    # On some Docker/kernel combos the container starts before the network
+    # namespace is fully initialised, leaving the interface with no IP.
+    for i in range(30):
+        try:
+            s = socket.socket()
+            s.settimeout(2)
+            s.connect(("8.8.8.8", 53))
+            s.close()
+            print(f"[entrypoint] Network ready after {i}s", flush=True)
+            break
+        except OSError:
+            if i == 0:
+                print("[entrypoint] Waiting for network...", flush=True)
+            time.sleep(1)
+
     db_url = os.environ.get("DATABASE_URL", "")
     if db_url:
         resolved, hostname, ip = resolve_db_url(db_url)
