@@ -47,14 +47,30 @@ _pool: asyncpg.Pool | None = None
 async def startup():
     global _pool
     import asyncio
+    import socket
+    import re
+
+    # On WSL2, asyncio thread-pool DNS can't reach Docker's 127.0.0.11 resolver.
+    # Resolve the hostname synchronously first, then substitute the IP.
+    db_url = DATABASE_URL
+    match = re.search(r"@([^:/]+)(:\d+)?/", db_url)
+    if match:
+        hostname = match.group(1)
+        try:
+            ip = socket.gethostbyname(hostname)
+            db_url = db_url.replace(f"@{hostname}", f"@{ip}", 1)
+            print(f"Resolved {hostname} -> {ip}")
+        except Exception as e:
+            print(f"Could not pre-resolve {hostname}: {e}, using as-is")
+
     last_err = None
     for attempt in range(10):
         try:
-            _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10, ssl=False)
+            _pool = await asyncpg.create_pool(db_url, min_size=2, max_size=10, ssl=False)
             return
         except Exception as e:
             last_err = e
-            wait = 2 ** attempt
+            wait = min(2 ** attempt, 30)
             print(f"DB connect attempt {attempt + 1} failed: {e}. Retrying in {wait}s...")
             await asyncio.sleep(wait)
     raise RuntimeError(f"Could not connect to database after 10 attempts: {last_err}")
