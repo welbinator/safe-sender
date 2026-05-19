@@ -50,11 +50,15 @@ async def startup():
     last_err = None
     for attempt in range(10):
         try:
-            _pool = await asyncpg.create_pool(
-                DATABASE_URL,
-                min_size=2,
-                max_size=10,
-                ssl=False,
+            _pool = await asyncio.wait_for(
+                asyncpg.create_pool(
+                    DATABASE_URL,
+                    min_size=2,
+                    max_size=10,
+                    ssl=False,
+                    command_timeout=10,
+                ),
+                timeout=15,
             )
             return
         except Exception as e:
