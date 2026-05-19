@@ -61,13 +61,22 @@ async def startup():
     last_err = None
     for attempt in range(10):
         try:
+            # Parse the URL into explicit kwargs to avoid asyncpg calling
+            # loop.getaddrinfo() — which hangs in executor threads on this
+            # Docker/WSL2 kernel combo even for raw IPs.
+            from urllib.parse import urlparse
+            _u = urlparse(DATABASE_URL)
             _pool = await asyncio.wait_for(
                 asyncpg.create_pool(
-                    DATABASE_URL,
+                    host=_u.hostname,
+                    port=_u.port or 5432,
+                    user=_u.username,
+                    password=_u.password,
+                    database=_u.path.lstrip("/"),
                     min_size=2,
                     max_size=10,
                     ssl=False,
-                    command_timeout=10,
+                    timeout=10,
                 ),
                 timeout=15,
             )
