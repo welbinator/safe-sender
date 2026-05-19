@@ -25,6 +25,8 @@ Internal (SMTP service only, not exposed via nginx):
 """
 import hashlib
 import os
+import re
+import socket
 from typing import Optional
 
 import asyncpg
@@ -35,8 +37,27 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://sendersafety:changeme@postgres:5432/sendersafety"
 )
 
-app = FastAPI(title="Sender Safety API", version="0.3.0")
+# ---------------------------------------------------------------------------
+# Pre-resolve the DB hostname at module load time (before asyncio starts).
+# On WSL2, Docker's embedded DNS (127.0.0.11) is unreachable from within an
+# asyncio event loop's thread-pool executor. Resolving synchronously here,
+# before the event loop is created, works around this kernel bug.
+# ---------------------------------------------------------------------------
+def _resolve_db_url(url: str) -> str:
+    match = re.search(r"@([^:/]+)(:\d+)?/", url)
+    if match:
+        hostname = match.group(1)
+        try:
+            ip = socket.gethostbyname(hostname)
+            url = url.replace(f"@{hostname}", f"@{ip}", 1)
+            print(f"[startup] Resolved DB host {hostname!r} -> {ip}")
+        except Exception as e:
+            print(f"[startup] Could not resolve DB host {hostname!r}: {e}")
+    return url
 
+_RESOLVED_DB_URL = _resolve_db_url(DATABASE_URL)
+
+app = FastAPI(title="Sender Safety API", version="0.3.0")
 # ---------------------------------------------------------------------------
 # Database connection pool (created on startup)
 # ---------------------------------------------------------------------------
@@ -47,26 +68,16 @@ _pool: asyncpg.Pool | None = None
 async def startup():
     global _pool
     import asyncio
-    import socket
-    import re
-
-    # On WSL2, asyncio thread-pool DNS can't reach Docker's 127.0.0.11 resolver.
-    # Resolve the hostname synchronously first, then substitute the IP.
-    db_url = DATABASE_URL
-    match = re.search(r"@([^:/]+)(:\d+)?/", db_url)
-    if match:
-        hostname = match.group(1)
-        try:
-            ip = socket.gethostbyname(hostname)
-            db_url = db_url.replace(f"@{hostname}", f"@{ip}", 1)
-            print(f"Resolved {hostname} -> {ip}")
-        except Exception as e:
-            print(f"Could not pre-resolve {hostname}: {e}, using as-is")
 
     last_err = None
     for attempt in range(10):
         try:
-            _pool = await asyncpg.create_pool(db_url, min_size=2, max_size=10, ssl=False)
+            _pool = await asyncpg.create_pool(
+                _RESOLVED_DB_URL,
+                min_size=2,
+                max_size=10,
+                ssl=False,
+            )
             return
         except Exception as e:
             last_err = e
