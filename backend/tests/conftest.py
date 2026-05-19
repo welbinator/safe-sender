@@ -1,23 +1,22 @@
 """
-Test setup: initialise the asyncpg pool directly so TestClient tests have a
-live DB connection without relying on the startup event (which requires the
-entrypoint's DNS resolution to have already run).
+Test setup: initialise a real asyncpg pool and inject it via FastAPI's
+dependency_overrides so TestClient never needs the startup event to run.
 """
 import asyncio
 import os
+from urllib.parse import urlparse
 
 import asyncpg
 import pytest
-from urllib.parse import urlparse
 
 
 @pytest.fixture(scope="session", autouse=True)
-def init_db_pool():
-    import main
+def override_db_pool():
+    from main import app, get_pool as _app_get_pool
 
     db_url = os.environ.get(
         "DATABASE_URL",
-        "postgresql://sendersafety:changeme@postgres:5432/sendersafety",
+        "postgresql://sendersafety:S3cur3P@ss2024@postgres:5432/sendersafety",
     )
     _u = urlparse(db_url)
 
@@ -36,7 +35,15 @@ def init_db_pool():
 
     loop = asyncio.new_event_loop()
     pool = loop.run_until_complete(_setup())
-    main._pool = pool  # inject directly — bypasses the startup event
+
+    # Override the FastAPI dependency so every request gets our pool directly
+    def _get_pool_override():
+        return pool
+
+    app.dependency_overrides[_app_get_pool] = _get_pool_override
+
     yield
+
+    app.dependency_overrides.clear()
     loop.run_until_complete(pool.close())
     loop.close()
