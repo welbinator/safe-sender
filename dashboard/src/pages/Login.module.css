@@ -1,0 +1,24 @@
+
+.page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 3rem 2.5rem;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0,0,0,.15);
+  width: 100%;
+  max-width: 380px;
+}
+
+.logo { font-size: 3rem; margin-bottom: .5rem; }
+.brand { font-size: 1.75rem; font-weight: 800; color: #1a1a2e; margin-bottom: .5rem; }
+.tagline { color: #718096; font-size: 0.9rem; margin-bottom: 2rem; }
+.btn { display: flex; justify-content: center; }
+.warn { color: #e53e3e; font-size: 0.8rem; margin-top: 1rem; }

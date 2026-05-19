@@ -1,0 +1,45 @@
+
+.shell { display: flex; min-height: 100vh; background: #f7fafc; }
+
+.sidebar {
+  width: 220px;
+  background: #1a1a2e;
+  color: #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: 1.5rem 1.25rem;
+  font-size: 1rem;
+  font-weight: 700;
+  border-bottom: 1px solid #2d2d4e;
+}
+
+.logo { font-size: 1.3rem; }
+
+.nav { flex: 1; padding: .75rem 0; }
+
+.navItem {
+  display: block;
+  padding: .6rem 1.25rem;
+  color: #a0aec0;
+  text-decoration: none;
+  font-size: 0.9rem;
+  border-radius: 0;
+  transition: background .15s, color .15s;
+}
+
+.navItem:hover { background: #2d2d4e; color: #fff; }
+.navItem.active { background: #4f46e5; color: #fff; }
+
+.footer { padding: 1.25rem; border-top: 1px solid #2d2d4e; }
+.user { font-size: 0.78rem; color: #718096; margin-bottom: .5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logoutBtn { width: 100%; padding: .4rem; background: transparent; border: 1px solid #4a5568; border-radius: 6px; color: #a0aec0; cursor: pointer; font-size: 0.82rem; }
+.logoutBtn:hover { background: #2d2d4e; color: #fff; }
+
+.main { flex: 1; overflow-y: auto; }

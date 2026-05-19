@@ -1,0 +1,31 @@
+
+.container { padding: 2rem; }
+.title { font-size: 1.5rem; font-weight: 700; margin-bottom: 1.5rem; color: #1a1a2e; }
+.error { color: #e53e3e; background: #fff5f5; padding: .5rem 1rem; border-radius: 6px; margin-bottom: .75rem; }
+
+.form { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; margin-bottom: 2rem; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.formTitle { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: #2d3748; }
+
+.row { display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.row label { display: flex; flex-direction: column; gap: .3rem; font-size: 0.85rem; font-weight: 500; color: #4a5568; flex: 1; min-width: 160px; }
+.row input, .row select { padding: .45rem .75rem; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 0.9rem; }
+.checkboxLabel { flex-direction: row !important; align-items: center; gap: .5rem !important; padding-top: 1.4rem; }
+
+.actions { display: flex; gap: .75rem; }
+.actions button { padding: .5rem 1.25rem; border-radius: 6px; border: none; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+.actions button[type="submit"] { background: #4f46e5; color: #fff; }
+.actions button[type="submit"]:hover { background: #4338ca; }
+.actions button[type="button"] { background: #e2e8f0; color: #2d3748; }
+
+.table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.table th, .table td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid #e2e8f0; font-size: 0.88rem; }
+.table th { background: #f7fafc; font-weight: 600; color: #4a5568; }
+.table code { background: #edf2f7; padding: 2px 6px; border-radius: 4px; }
+.exceptionRow td { color: #38a169; }
+.dim { color: #a0aec0; font-style: italic; }
+.empty { text-align: center; color: #a0aec0; padding: 2rem; }
+.rowActions { display: flex; gap: .5rem; }
+.rowActions button { padding: .25rem .6rem; border-radius: 4px; border: 1px solid #cbd5e0; cursor: pointer; font-size: 0.82rem; background: #fff; }
+.rowActions button:hover { background: #edf2f7; }
+.deleteBtn { color: #e53e3e !important; border-color: #fed7d7 !important; }
+.deleteBtn:hover { background: #fff5f5 !important; }
