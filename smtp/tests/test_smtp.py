@@ -137,7 +137,7 @@ class TestSafeSenderHandler:
         assert result == "250 OK"
         mock_ses.assert_called_once()
         mock_log.assert_called_once()
-        assert mock_log.call_args.kwargs["outcome"] == "passed"
+        assert mock_log.call_args.kwargs["outcome"] == "allowed"
 
     @patch("main._log_scan", new_callable=AsyncMock)
     @patch("main._forward_via_ses")
@@ -203,7 +203,7 @@ class TestSafeSenderHandler:
         # Should pass — keyword is in body but rule scope is subject-only
         assert result == "250 OK"
         mock_ses.assert_called_once()
-        assert mock_log.call_args.kwargs["outcome"] == "passed"
+        assert mock_log.call_args.kwargs["outcome"] == "allowed"
 
     @patch("main._log_scan", new_callable=AsyncMock)
     @patch("main._forward_via_ses")
@@ -222,4 +222,4 @@ class TestSafeSenderHandler:
         # Exception rule overrides — should pass
         assert result == "250 OK"
         mock_ses.assert_called_once()
-        assert mock_log.call_args.kwargs["outcome"] == "passed"
+        assert mock_log.call_args.kwargs["outcome"] == "allowed"

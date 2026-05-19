@@ -283,7 +283,7 @@ class SafeSenderHandler:
             recipient=recipient,
             subject_hash=subject_hash,
             matched_rule_id=None,
-            outcome="passed",
+            outcome="allowed",
         )
         return "250 OK"
 
