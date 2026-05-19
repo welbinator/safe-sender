@@ -12,7 +12,8 @@ import pytest
 
 @pytest.fixture(scope="session", autouse=True)
 def override_db_pool():
-    from main import app, get_pool as _app_get_pool
+    from main import app
+    from deps import get_pool as _app_get_pool
 
     db_url = os.environ.get(
         "DATABASE_URL",
