@@ -34,6 +34,7 @@ from pydantic import BaseModel, field_validator
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://sendersafety:changeme@postgres:5432/sendersafety"
 )
+print(f"[main] DATABASE_URL host portion: ...@{DATABASE_URL.split('@')[-1]}", flush=True)
 
 app = FastAPI(title="Sender Safety API", version="0.3.0")
 # ---------------------------------------------------------------------------
