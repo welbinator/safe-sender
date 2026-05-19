@@ -38,6 +38,12 @@ if __name__ == "__main__":
     if db_url:
         os.environ["DATABASE_URL"] = resolve_db_url(db_url)
 
+    # Ensure the app directory is in the Python path
+    app_dir = "/app"
+    if app_dir not in sys.path:
+        sys.path.insert(0, app_dir)
+    os.chdir(app_dir)
+
     # Replace this process with uvicorn
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, loop="asyncio")
