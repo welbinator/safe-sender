@@ -1,8 +1,9 @@
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { authGoogle } from '../api';
+import SmtpWelcomeModal from '../components/SmtpWelcomeModal';
 import styles from './Login.module.css';
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
@@ -11,6 +12,7 @@ export default function Login() {
   const { login, customer } = useAuth();
   const navigate = useNavigate();
   const btnRef = useRef(null);
+  const [smtpCreds, setSmtpCreds] = useState(null); // { username, password } for new users
 
   useEffect(() => {
     if (customer) { navigate('/'); return; }
@@ -22,7 +24,11 @@ export default function Login() {
         try {
           const res = await authGoogle(credential);
           login(res.data.access_token, res.data.customer);
-          navigate('/');
+          if (res.data.is_new && res.data.smtp_username && res.data.smtp_password) {
+            setSmtpCreds({ username: res.data.smtp_username, password: res.data.smtp_password });
+          } else {
+            navigate('/');
+          }
         } catch (err) {
           console.error('Login failed', err);
           alert(err.response?.data?.detail || 'Login failed. Make sure you have a Google Workspace account.');
@@ -48,6 +54,14 @@ export default function Login() {
           <p className={styles.warn}>⚠ VITE_GOOGLE_CLIENT_ID not set</p>
         )}
       </div>
+
+      {smtpCreds && (
+        <SmtpWelcomeModal
+          username={smtpCreds.username}
+          password={smtpCreds.password}
+          onDone={() => { setSmtpCreds(null); navigate('/'); }}
+        />
+      )}
     </div>
   );
 }
