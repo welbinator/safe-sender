@@ -7,6 +7,7 @@ import RulesManager from './widgets/RulesManager';
 import ScanLog from './widgets/ScanLog';
 import Stats from './widgets/Stats';
 import SetupGuide from './widgets/SetupGuide';
+import SmtpCredentials from './widgets/SmtpCredentials';
 
 const widgetRegistry = [
   {
@@ -26,6 +27,12 @@ const widgetRegistry = [
     label: 'Logs',
     route: '/logs',
     Component: ScanLog,
+  },
+  {
+    id: 'smtp',
+    label: 'SMTP Credentials',
+    route: '/smtp',
+    Component: SmtpCredentials,
   },
   {
     id: 'setup',

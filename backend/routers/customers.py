@@ -8,12 +8,10 @@ Customer endpoints:
 """
 import os
 import secrets
-import smtplib
-import time
 from email.mime.text import MIMEText
-from typing import Any, Optional
 
 import asyncpg
+import bcrypt
 import dns.resolver
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -262,3 +260,70 @@ async def test_connection(
                 "Your SMTP gateway may not be configured yet, or DNS propagation is still in progress."
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# GET  /customers/me/smtp-credentials
+# POST /customers/me/smtp-credentials/rotate
+# ---------------------------------------------------------------------------
+
+class SmtpCredentialsResponse(BaseModel):
+    smtp_host: str
+    smtp_port: int
+    smtp_username: str
+
+
+class SmtpRotateResponse(BaseModel):
+    smtp_host: str
+    smtp_port: int
+    smtp_username: str
+    smtp_password: str  # plaintext — shown once only
+
+
+@router.get("/me/smtp-credentials", response_model=SmtpCredentialsResponse)
+async def get_smtp_credentials(
+    customer: dict = Depends(get_current_customer),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Return SMTP host/port/username. Password is never returned after initial signup."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT smtp_username FROM customers WHERE id = $1", customer["id"]
+        )
+    if not row or not row["smtp_username"]:
+        raise HTTPException(status_code=404, detail="SMTP credentials not yet generated")
+    return SmtpCredentialsResponse(
+        smtp_host="smtp.sendersafety.com",
+        smtp_port=587,
+        smtp_username=row["smtp_username"],
+    )
+
+
+@router.post("/me/smtp-credentials/rotate", response_model=SmtpRotateResponse)
+async def rotate_smtp_credentials(
+    customer: dict = Depends(get_current_customer),
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Generate a new password. Returns plaintext password once — store it immediately."""
+    new_password = secrets.token_urlsafe(16)
+    new_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE customers
+            SET smtp_password_hash = $1
+            WHERE id = $2
+            RETURNING smtp_username
+            """,
+            new_hash,
+            customer["id"],
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return SmtpRotateResponse(
+        smtp_host="smtp.sendersafety.com",
+        smtp_port=587,
+        smtp_username=row["smtp_username"],
+        smtp_password=new_password,
+    )

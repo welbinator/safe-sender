@@ -301,17 +301,39 @@ def _forward_via_ses(raw_message: bytes, mail_from: str, rcpt_tos: list[str]) ->
 # ---------------------------------------------------------------------------
 
 class Authenticator:
-    """Simple single-credential AUTH LOGIN/PLAIN authenticator."""
+    """
+    Authenticates SMTP clients by verifying credentials against the backend DB.
+    Falls back to AUTH_USERNAME/AUTH_PASSWORD env vars for admin/testing.
+    """
 
     def __call__(self, server, session, envelope, mechanism, auth_data):
         if not isinstance(auth_data, LoginPassword):
             return AuthResult(success=False, handled=True)
         username = auth_data.login.decode() if isinstance(auth_data.login, bytes) else auth_data.login
         password = auth_data.password.decode() if isinstance(auth_data.password, bytes) else auth_data.password
-        if username == AUTH_USERNAME and password == AUTH_PASSWORD:
+
+        # Run async DB lookup in the event loop
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(self._verify(username, password))
+        if result:
+            # Stash customer info on session for use in handle_DATA
+            session.smtp_customer_id = result.get("customer_id")
+            session.smtp_domain = result.get("domain")
             return AuthResult(success=True)
         logger.warning("AUTH failed", extra={"user": username})
         return AuthResult(success=False, handled=True)
+
+    async def _verify(self, username: str, password: str) -> dict | None:
+        url = f"{BACKEND_URL}/internal/smtp-auth"
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(url, params={"username": username, "password": password}) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    return None
+        except Exception as exc:
+            logger.error("Auth backend unreachable", extra={"error": str(exc)})
+            return None
 
 
 # ---------------------------------------------------------------------------

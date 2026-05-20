@@ -225,3 +225,36 @@ async def check_suppressed(email: str):
     if row:
         return {"suppressed": True}
     raise HTTPException(status_code=404, detail="Not suppressed")
+
+
+# ---------------------------------------------------------------------------
+# GET /internal/smtp-auth  — called by SMTP server to verify credentials
+# ---------------------------------------------------------------------------
+
+@app.get("/internal/smtp-auth")
+async def smtp_auth(username: str, password: str):
+    """
+    Verify SMTP credentials. Returns customer info on success, 401 on failure.
+    Also accepts global AUTH_USERNAME/AUTH_PASSWORD env vars as admin fallback.
+    """
+    # Admin/test fallback
+    admin_user = os.environ.get("AUTH_USERNAME", "")
+    admin_pass = os.environ.get("AUTH_PASSWORD", "")
+    if admin_user and username == admin_user and password == admin_pass:
+        return {"customer_id": None, "domain": None, "admin": True}
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, domain, smtp_password_hash FROM customers WHERE smtp_username = $1",
+            username,
+        )
+    if not row or not row["smtp_password_hash"]:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    import bcrypt as _bcrypt
+    valid = _bcrypt.checkpw(password.encode(), row["smtp_password_hash"].encode())
+    if not valid:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return {"customer_id": str(row["id"]), "domain": row["domain"], "admin": False}

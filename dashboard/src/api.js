@@ -37,3 +37,7 @@ export const verifyDomainInit = () => api.post('/customers/verify-domain/init');
 export const verifyDomainCheck = () => api.post('/customers/verify-domain/check');
 export const testConnection = () => api.post('/customers/test-connection');
 
+// Sprint 7 — SMTP credentials
+export const getSmtpCredentials = () => api.get('/customers/me/smtp-credentials');
+export const rotateSmtpCredentials = () => api.post('/customers/me/smtp-credentials/rotate');
+

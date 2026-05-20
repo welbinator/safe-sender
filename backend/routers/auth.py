@@ -9,9 +9,11 @@ Flow:
 5. We return our own JWT session token.
 """
 import os
+import secrets
 from typing import Optional
 
 import asyncpg
+import bcrypt
 import boto3
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -121,6 +123,16 @@ class AuthResponse(BaseModel):
     customer_id: str
     email: str
     is_new: bool
+    smtp_username: Optional[str] = None
+    smtp_password: Optional[str] = None  # plaintext, returned once on signup only
+
+
+def _generate_smtp_credentials() -> tuple[str, str, str]:
+    """Return (smtp_username, raw_password, password_hash)."""
+    smtp_username = "ss_" + secrets.token_hex(8)
+    raw_password = secrets.token_urlsafe(16)
+    password_hash = bcrypt.hashpw(raw_password.encode(), bcrypt.gensalt()).decode()
+    return smtp_username, raw_password, password_hash
 
 
 @router.post("/google", response_model=AuthResponse)
@@ -168,17 +180,20 @@ async def auth_google(
                     ),
                 )
 
-            # New customer — insert
+            # New customer — generate SMTP credentials + insert
+            smtp_username, smtp_raw_password, smtp_password_hash = _generate_smtp_credentials()
             row = await conn.fetchrow(
                 """
-                INSERT INTO customers (domain, name, email, google_sub, plan)
-                VALUES ($1, $2, $3, $4, 'basic')
+                INSERT INTO customers (domain, name, email, google_sub, plan, smtp_username, smtp_password_hash)
+                VALUES ($1, $2, $3, $4, 'basic', $5, $6)
                 RETURNING id, email
                 """,
                 domain.lower(),
                 company_name,
                 email,
                 google_sub,
+                smtp_username,
+                smtp_password_hash,
             )
             customer_id = str(row["id"])
             is_new = True
@@ -193,4 +208,6 @@ async def auth_google(
         customer_id=customer_id,
         email=email,
         is_new=is_new,
+        smtp_username=smtp_username if is_new else None,
+        smtp_password=smtp_raw_password if is_new else None,
     )
