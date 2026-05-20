@@ -1,9 +1,8 @@
-
 import { useEffect, useState } from 'react';
 import { getRules, createRule, updateRule, deleteRule } from '../api';
 import styles from './RulesManager.module.css';
 
-const BLANK = { pattern: '', match_type: 'string', scope: 'both', applies_to: '', is_exception: false };
+const BLANK = { name: '', pattern: '', match_type: 'string', scope: 'both', applies_to: '', is_exception: false };
 
 export default function RulesManager() {
   const [rules, setRules] = useState([]);
@@ -39,10 +38,11 @@ export default function RulesManager() {
   const startEdit = (rule) => {
     setEditId(rule.id);
     setForm({
+      name: rule.name || '',
       pattern: rule.pattern,
       match_type: rule.match_type,
       scope: rule.scope,
-      applies_to: rule.applies_to || '',
+      applies_to: rule.applies_to_email || '',
       is_exception: rule.is_exception,
     });
   };
@@ -68,6 +68,14 @@ export default function RulesManager() {
         {error && <div className={styles.error}>{error}</div>}
         <div className={styles.row}>
           <label>
+            Rule Name <span className={styles.optional}>(optional)</span>
+            <input
+              value={form.name}
+              onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+              placeholder="e.g. Competitor Mentions"
+            />
+          </label>
+          <label>
             Pattern
             <input
               required
@@ -92,7 +100,7 @@ export default function RulesManager() {
             </select>
           </label>
         </div>
-        <div className={styles.row}>
+        <div className={styles.row}> 
           <label>
             Applies To (email, optional)
             <input
@@ -119,6 +127,7 @@ export default function RulesManager() {
       <table className={styles.table}>
         <thead>
           <tr>
+            <th>Name</th>
             <th>Pattern</th>
             <th>Type</th>
             <th>Scope</th>
@@ -129,14 +138,15 @@ export default function RulesManager() {
         </thead>
         <tbody>
           {rules.length === 0 && (
-            <tr><td colSpan={6} className={styles.empty}>No rules yet. Add one above.</td></tr>
+            <tr><td colSpan={7} className={styles.empty}>No rules yet. Add one above.</td></tr>
           )}
           {rules.map(rule => (
             <tr key={rule.id} className={rule.is_exception ? styles.exceptionRow : ''}>
+              <td>{rule.name ? rule.name : <span className={styles.dim}>—</span>}</td>
               <td><code>{rule.pattern}</code></td>
               <td>{rule.match_type}</td>
               <td>{rule.scope}</td>
-              <td>{rule.applies_to || <span className={styles.dim}>org-wide</span>}</td>
+              <td>{rule.applies_to_email || <span className={styles.dim}>org-wide</span>}</td>
               <td>{rule.is_exception ? '✓' : ''}</td>
               <td className={styles.rowActions}>
                 <button onClick={() => startEdit(rule)}>Edit</button>

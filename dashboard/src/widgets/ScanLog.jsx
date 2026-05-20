@@ -41,9 +41,9 @@ export default function ScanLog() {
 
   const ruleLabel = (log) => {
     if (!log.matched_rule_id) return <span className={styles.dim}>—</span>;
-    const desc = log.matched_rule_description;
+    const name = log.matched_rule_name;
     const pattern = log.matched_rule_pattern;
-    if (desc) return <span title={pattern}><code>{pattern}</code> <span className={styles.dim}>— {desc}</span></span>;
+    if (name) return <span title={pattern} className={styles.ruleName}>{name}</span>;
     return <code>{pattern}</code>;
   };
 

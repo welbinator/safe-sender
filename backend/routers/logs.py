@@ -19,6 +19,7 @@ class LogEntry(BaseModel):
     recipient: str
     outcome: str
     matched_rule_id: Optional[str]
+    matched_rule_name: Optional[str]
     matched_rule_pattern: Optional[str]
     matched_rule_description: Optional[str]
     created_at: datetime
@@ -78,7 +79,8 @@ async def list_logs(
             SELECT
                 l.id, l.sender, l.recipient, l.outcome,
                 l.matched_rule_id, l.created_at,
-                r.pattern  AS matched_rule_pattern,
+                r.name        AS matched_rule_name,
+                r.pattern     AS matched_rule_pattern,
                 r.description AS matched_rule_description
             FROM scan_logs l
             LEFT JOIN rules r ON r.id = l.matched_rule_id
@@ -102,6 +104,7 @@ async def list_logs(
                 recipient=r["recipient"],
                 outcome=r["outcome"],
                 matched_rule_id=str(r["matched_rule_id"]) if r["matched_rule_id"] else None,
+                matched_rule_name=r["matched_rule_name"],
                 matched_rule_pattern=r["matched_rule_pattern"],
                 matched_rule_description=r["matched_rule_description"],
                 created_at=r["created_at"],

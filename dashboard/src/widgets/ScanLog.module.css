@@ -118,3 +118,4 @@
 .email { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rule  { max-width: 220px; }
 
+\n.ruleName { color: var(--text-1); font-weight: 500; font-size: 13px; }

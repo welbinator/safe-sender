@@ -26,6 +26,7 @@ VALID_SCOPES = {"external", "internal", "both"}
 # ---------------------------------------------------------------------------
 
 class RuleBase(BaseModel):
+    name: Optional[str] = None
     pattern: str
     match_type: str
     scope: str = "external"
@@ -50,7 +51,6 @@ class RuleBase(BaseModel):
     @field_validator("pattern")
     @classmethod
     def validate_pattern(cls, v: str, info) -> str:
-        # Validated after match_type is set in model; check regex compiles
         return v
 
 
@@ -58,11 +58,11 @@ class RuleCreate(RuleBase):
     @field_validator("pattern")
     @classmethod
     def validate_regex_compiles(cls, v: str) -> str:
-        # We can't easily access match_type here, so validate on creation
         return v
 
 
 class RuleUpdate(BaseModel):
+    name: Optional[str] = None
     pattern: Optional[str] = None
     match_type: Optional[str] = None
     scope: Optional[str] = None
@@ -89,6 +89,7 @@ class RuleUpdate(BaseModel):
 class RuleResponse(BaseModel):
     id: str
     customer_id: str
+    name: Optional[str]
     pattern: str
     match_type: str
     scope: str
@@ -106,6 +107,7 @@ def _row_to_rule(row) -> RuleResponse:
     return RuleResponse(
         id=str(row["id"]),
         customer_id=str(row["customer_id"]),
+        name=row["name"],
         pattern=row["pattern"],
         match_type=row["match_type"],
         scope=row["scope"],
@@ -139,7 +141,7 @@ async def list_rules(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, customer_id, pattern, match_type, scope,
+            SELECT id, customer_id, name, pattern, match_type, scope,
                    applies_to_email, is_exception, active, description
             FROM rules
             WHERE customer_id = $1
@@ -161,13 +163,14 @@ async def create_rule(
         row = await conn.fetchrow(
             """
             INSERT INTO rules
-                (customer_id, pattern, match_type, scope,
+                (customer_id, name, pattern, match_type, scope,
                  applies_to_email, is_exception, description)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, customer_id, pattern, match_type, scope,
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id, customer_id, name, pattern, match_type, scope,
                       applies_to_email, is_exception, active, description
             """,
             customer["id"],
+            body.name,
             body.pattern,
             body.match_type,
             body.scope,
@@ -193,7 +196,6 @@ async def update_rule(
         if not existing:
             raise HTTPException(status_code=404, detail="Rule not found")
 
-        # Merge updates onto existing values
         new_pattern = body.pattern if body.pattern is not None else existing["pattern"]
         new_match_type = body.match_type if body.match_type is not None else existing["match_type"]
         _assert_valid_regex(new_pattern, new_match_type)
@@ -201,18 +203,20 @@ async def update_rule(
         row = await conn.fetchrow(
             """
             UPDATE rules SET
-                pattern          = COALESCE($1, pattern),
-                match_type       = COALESCE($2, match_type),
-                scope            = COALESCE($3, scope),
-                applies_to_email = COALESCE($4, applies_to_email),
-                is_exception     = COALESCE($5, is_exception),
-                description      = COALESCE($6, description),
-                active           = COALESCE($7, active),
+                name             = COALESCE($1, name),
+                pattern          = COALESCE($2, pattern),
+                match_type       = COALESCE($3, match_type),
+                scope            = COALESCE($4, scope),
+                applies_to_email = COALESCE($5, applies_to_email),
+                is_exception     = COALESCE($6, is_exception),
+                description      = COALESCE($7, description),
+                active           = COALESCE($8, active),
                 updated_at       = NOW()
-            WHERE id = $8 AND customer_id = $9
-            RETURNING id, customer_id, pattern, match_type, scope,
+            WHERE id = $9 AND customer_id = $10
+            RETURNING id, customer_id, name, pattern, match_type, scope,
                       applies_to_email, is_exception, active, description
             """,
+            body.name,
             body.pattern,
             body.match_type,
             body.scope,
@@ -237,6 +241,5 @@ async def delete_rule(
             "DELETE FROM rules WHERE id = $1 AND customer_id = $2",
             rule_id, customer["id"],
         )
-    # asyncpg returns "DELETE N" — N=0 means row didn't exist
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="Rule not found")
