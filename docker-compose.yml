@@ -39,6 +39,7 @@ services:
   smtp:
     build: ./smtp
     ports:
+      - "25:25"
       - "587:587"
     depends_on:
       postgres:

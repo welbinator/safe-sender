@@ -1,4 +1,3 @@
-
 import { useEffect, useState, useCallback } from 'react';
 import { getLogs } from '../api';
 import styles from './ScanLog.module.css';
@@ -15,7 +14,7 @@ export default function ScanLog() {
 
   const load = useCallback(() => {
     setLoading(true);
-    const params = { limit: PAGE_SIZE, offset: page * PAGE_SIZE };
+    const params = { page: page + 1, page_size: PAGE_SIZE };
     if (filters.outcome) params.outcome = filters.outcome;
     if (filters.sender) params.sender = filters.sender;
     if (filters.date_from) params.date_from = filters.date_from;
@@ -23,7 +22,7 @@ export default function ScanLog() {
 
     getLogs(params)
       .then(r => {
-        setLogs(r.data.logs || []);
+        setLogs(r.data.results || []);
         setTotal(r.data.total || 0);
       })
       .catch(() => setError('Failed to load logs'))
@@ -38,6 +37,14 @@ export default function ScanLog() {
     e.preventDefault();
     setPage(0);
     load();
+  };
+
+  const ruleLabel = (log) => {
+    if (!log.matched_rule_id) return <span className={styles.dim}>—</span>;
+    const desc = log.matched_rule_description;
+    const pattern = log.matched_rule_pattern;
+    if (desc) return <span title={pattern}><code>{pattern}</code> <span className={styles.dim}>— {desc}</span></span>;
+    return <code>{pattern}</code>;
   };
 
   return (
@@ -75,10 +82,10 @@ export default function ScanLog() {
           <thead>
             <tr>
               <th>Time</th>
-              <th>Sender</th>
-              <th>Recipient</th>
+              <th>From</th>
+              <th>To</th>
               <th>Outcome</th>
-              <th>Matched Rule</th>
+              <th>Rule Triggered</th>
             </tr>
           </thead>
           <tbody>
@@ -91,14 +98,14 @@ export default function ScanLog() {
             {!loading && logs.map((log, i) => (
               <tr key={i}>
                 <td className={styles.time}>{new Date(log.created_at).toLocaleString()}</td>
-                <td>{log.sender}</td>
-                <td>{log.recipient}</td>
+                <td className={styles.email}>{log.sender}</td>
+                <td className={styles.email}>{log.recipient}</td>
                 <td>
                   <span className={log.outcome === 'blocked' ? styles.blocked : styles.allowed}>
-                    {log.outcome}
+                    {log.outcome === 'blocked' ? '🚫 blocked' : '✓ delivered'}
                   </span>
                 </td>
-                <td>{log.matched_rule ? <code>{log.matched_rule}</code> : <span className={styles.dim}>—</span>}</td>
+                <td className={styles.rule}>{ruleLabel(log)}</td>
               </tr>
             ))}
           </tbody>

@@ -12,7 +12,7 @@ export default function Stats() {
     const today = new Date().toISOString().split('T')[0];
     api.get('/logs', { params: { date_from: today, limit: 500 } })
       .then(r => {
-        const logs = r.data.logs || [];
+        const logs = r.data.results || [];
         const scanned = logs.length;
         const blocked = logs.filter(l => l.outcome === 'blocked').length;
         const allowed = logs.filter(l => l.outcome === 'allowed').length;

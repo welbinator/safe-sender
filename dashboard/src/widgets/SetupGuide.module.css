@@ -1,26 +1,5 @@
+.container { padding: 28px 24px; }
 
-.container { padding: 2rem; max-width: 740px; }
-.title { font-size: 1.5rem; font-weight: 700; margin-bottom: .5rem; color: #1a1a2e; }
-.intro { color: #718096; margin-bottom: 2rem; }
-
-.steps { display: flex; flex-direction: column; gap: 1.5rem; }
-
-.step { display: flex; gap: 1.25rem; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-
-.stepNumber {
-  width: 2.25rem; height: 2.25rem; border-radius: 50%;
-  background: #4f46e5; color: #fff;
-  font-weight: 700; font-size: 1rem;
-  display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
+@media (max-width: 640px) {
+  .container { padding: 20px 16px; }
 }
-
-.stepContent { flex: 1; }
-.stepTitle { font-size: 1rem; font-weight: 600; color: #2d3748; margin-bottom: .5rem; }
-.stepBody { font-size: 0.9rem; color: #4a5568; line-height: 1.6; }
-.stepBody ol { padding-left: 1.2rem; margin: .5rem 0; }
-.stepBody li { margin-bottom: .3rem; }
-.stepBody code { background: #edf2f7; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
-
-.note { margin-top: 2rem; padding: 1rem 1.25rem; background: #ebf8ff; border-radius: 8px; font-size: 0.9rem; color: #2c5282; }
-.note a { color: #4f46e5; }

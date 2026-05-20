@@ -1,13 +1,5 @@
 """
 GET /logs — paginated scan logs for the authenticated customer.
-
-Query params:
-  - page (int, default 1)
-  - page_size (int, default 50, max 200)
-  - outcome (str: "allowed" | "blocked")
-  - sender (str: filter by sender substring)
-  - date_from (ISO date string)
-  - date_to (ISO date string)
 """
 from datetime import datetime
 from typing import Any, List, Optional
@@ -27,6 +19,8 @@ class LogEntry(BaseModel):
     recipient: str
     outcome: str
     matched_rule_id: Optional[str]
+    matched_rule_pattern: Optional[str]
+    matched_rule_description: Optional[str]
     created_at: datetime
 
 
@@ -49,27 +43,27 @@ async def list_logs(
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     offset = (page - 1) * page_size
-    filters = ["customer_id = $1"]
+    filters = ["l.customer_id = $1"]
     params: list = [customer["id"]]
     idx = 2
 
     if outcome:
-        filters.append(f"outcome = ${idx}")
+        filters.append(f"l.outcome = ${idx}")
         params.append(outcome)
         idx += 1
 
     if sender:
-        filters.append(f"sender ILIKE ${idx}")
+        filters.append(f"l.sender ILIKE ${idx}")
         params.append(f"%{sender}%")
         idx += 1
 
     if date_from:
-        filters.append(f"created_at >= ${idx}")
+        filters.append(f"l.created_at >= ${idx}")
         params.append(date_from)
         idx += 1
 
     if date_to:
-        filters.append(f"created_at <= ${idx}")
+        filters.append(f"l.created_at <= ${idx}")
         params.append(date_to)
         idx += 1
 
@@ -77,14 +71,19 @@ async def list_logs(
 
     async with pool.acquire() as conn:
         total: int = await conn.fetchval(
-            f"SELECT COUNT(*) FROM scan_logs WHERE {where}", *params
+            f"SELECT COUNT(*) FROM scan_logs l WHERE {where}", *params
         )
         rows = await conn.fetch(
             f"""
-            SELECT id, sender, recipient, outcome, matched_rule_id, created_at
-            FROM scan_logs
+            SELECT
+                l.id, l.sender, l.recipient, l.outcome,
+                l.matched_rule_id, l.created_at,
+                r.pattern  AS matched_rule_pattern,
+                r.description AS matched_rule_description
+            FROM scan_logs l
+            LEFT JOIN rules r ON r.id = l.matched_rule_id
             WHERE {where}
-            ORDER BY created_at DESC
+            ORDER BY l.created_at DESC
             LIMIT ${idx} OFFSET ${idx + 1}
             """,
             *params,
@@ -103,6 +102,8 @@ async def list_logs(
                 recipient=r["recipient"],
                 outcome=r["outcome"],
                 matched_rule_id=str(r["matched_rule_id"]) if r["matched_rule_id"] else None,
+                matched_rule_pattern=r["matched_rule_pattern"],
+                matched_rule_description=r["matched_rule_description"],
                 created_at=r["created_at"],
             )
             for r in rows

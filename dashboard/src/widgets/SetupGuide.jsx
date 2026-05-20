@@ -9,7 +9,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { getMe, verifyDomainInit, verifyDomainCheck, testConnection } from '../api';
+import { getMe, getRules, verifyDomainInit, verifyDomainCheck, testConnection } from '../api';
 
 // ---------------------------------------------------------------------------
 // Tiny shared UI helpers
@@ -206,7 +206,7 @@ const StepSmtpConfig = ({ domain }) => (
       <li>
         Set the outbound gateway to: <Code>smtp.sendersafety.com</Code>
       </li>
-      <li>Port: <Code>587</Code> &nbsp;·&nbsp; Requires TLS: <Code>Yes</Code></li>
+
       <li>Save and apply to your entire organisation</li>
     </ol>
     <Alert type="info" style={{ marginTop: 16 }}>
@@ -298,11 +298,10 @@ export default function SetupGuide() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [meRes] = await Promise.all([getMe()]);
+        const [meRes, rulesRes] = await Promise.all([getMe(), getRules()]);
         setCustomer(meRes.data);
         setDomainVerified(meRes.data.domain_verified);
-        // We'll treat "has rules" as always unknown here — user can check Rules page
-        // Future: could fetch rules count and display
+        setHasRules((rulesRes.data || []).length > 0);
       } catch (_) {}
       setLoading(false);
     };

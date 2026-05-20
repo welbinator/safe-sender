@@ -210,7 +210,7 @@ def _rule_matches(rule: dict, subject: str, body: str) -> bool:
         targets = [subject, body]
 
     for text in targets:
-        if match_type == "keyword":
+        if match_type in ("keyword", "string"):
             if pattern.lower() in text.lower():
                 return True
         elif match_type == "regex":
@@ -437,7 +437,8 @@ class SafeSenderHandler:
 
         matched_rule = None
         for rule in normal_rules:
-            if _rule_matches(rule, subject, body):
+            result = _rule_matches(rule, subject, body)
+            if result:
                 matched_rule = rule
                 break
 
@@ -543,6 +544,7 @@ if __name__ == "__main__":
 
     ssl_context = build_ssl_context()
 
+    # Port 587 - authenticated (direct SMTP clients)
     controller_kwargs = dict(
         hostname="0.0.0.0",
         port=587,
@@ -554,15 +556,27 @@ if __name__ == "__main__":
         controller_kwargs["ssl_context"] = ssl_context
         logger.info("TLS enabled", extra={"cert": TLS_CERT_PATH})
 
-    controller = Controller(handler, **controller_kwargs)
-    controller.start()
+    controller587 = Controller(handler, **controller_kwargs)
+    controller587.start()
     logger.info(
-        "Safe Sender SMTP server started",
+        "Safe Sender SMTP server started (port 587, auth required)",
         extra={"port": 587, "rate_limit_max": RATE_LIMIT_MAX, "rate_limit_window": RATE_LIMIT_WINDOW},
     )
+
+    # Port 25 - no auth (Google Workspace MTA-to-MTA outbound gateway)
+    controller25 = Controller(
+        handler,
+        hostname="0.0.0.0",
+        port=25,
+        auth_required=False,
+        auth_require_tls=False,
+    )
+    controller25.start()
+    logger.info("Safe Sender SMTP server started (port 25, no auth - MTA relay)", extra={"port": 25})
 
     try:
         asyncio.get_event_loop().run_forever()
     except KeyboardInterrupt:
-        controller.stop()
+        controller587.stop()
+        controller25.stop()
         logger.info("SMTP server stopped")

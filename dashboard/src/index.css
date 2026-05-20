@@ -1,4 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f7fafc; color: #2d3748; }
-a { color: inherit; }
+
+:root {
+  --bg:        #08090a;
+  --bg-panel:  #0f1011;
+  --bg-raised: #191a1b;
+  --bg-hover:  rgba(255,255,255,0.04);
+  --border:    rgba(255,255,255,0.08);
+  --border-sub:rgba(255,255,255,0.05);
+  --text-1:    #f7f8f8;
+  --text-2:    #d0d6e0;
+  --text-3:    #8a8f98;
+  --text-4:    #62666d;
+  --accent:    #5e6ad2;
+  --accent-lt: #7170ff;
+  --accent-hv: #828fff;
+  --green:     #22c55e;
+  --red:       #ef4444;
+  --amber:     #f59e0b;
+  --radius-sm: 4px;
+  --radius:    6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+html { color-scheme: dark; }
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-feature-settings: 'cv01', 'ss03';
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: inherit; text-decoration: none; }
+button { font-family: inherit; font-feature-settings: 'cv01', 'ss03'; cursor: pointer; }
+input, select, textarea { font-family: inherit; font-feature-settings: 'cv01', 'ss03'; }
+
+h1, h2, h3 { color: var(--text-1); font-weight: 600; }
+h1 { font-size: 1.5rem; letter-spacing: -.4px; }
+h2 { font-size: 1.15rem; letter-spacing: -.2px; }
+h3 { font-size: 1rem; }
+
+code, pre {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg-raised); border-radius: 3px; }
+
+/* Shared widget container */
+.widget-page {
+  padding: 28px 24px;
+  max-width: 900px;
+}
+
+@media (max-width: 640px) {
+  .widget-page { padding: 20px 16px; }
+}

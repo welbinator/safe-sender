@@ -1,31 +1,171 @@
+.container { padding: 28px 24px; max-width: 860px; }
 
-.container { padding: 2rem; }
-.title { font-size: 1.5rem; font-weight: 700; margin-bottom: 1.5rem; color: #1a1a2e; }
-.error { color: #e53e3e; background: #fff5f5; padding: .5rem 1rem; border-radius: 6px; margin-bottom: .75rem; }
+.title {
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--text-1);
+  letter-spacing: -.3px;
+  margin-bottom: 20px;
+}
 
-.form { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; margin-bottom: 2rem; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-.formTitle { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: #2d3748; }
+.form {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  margin-bottom: 20px;
+}
 
-.row { display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
-.row label { display: flex; flex-direction: column; gap: .3rem; font-size: 0.85rem; font-weight: 500; color: #4a5568; flex: 1; min-width: 160px; }
-.row input, .row select { padding: .45rem .75rem; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 0.9rem; }
-.checkboxLabel { flex-direction: row !important; align-items: center; gap: .5rem !important; padding-top: 1.4rem; }
+.formTitle {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin-bottom: 14px;
+}
 
-.actions { display: flex; gap: .75rem; }
-.actions button { padding: .5rem 1.25rem; border-radius: 6px; border: none; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
-.actions button[type="submit"] { background: #4f46e5; color: #fff; }
-.actions button[type="submit"]:hover { background: #4338ca; }
-.actions button[type="button"] { background: #e2e8f0; color: #2d3748; }
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
 
-.table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-.table th, .table td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid #e2e8f0; font-size: 0.88rem; }
-.table th { background: #f7fafc; font-weight: 600; color: #4a5568; }
-.table code { background: #edf2f7; padding: 2px 6px; border-radius: 4px; }
-.exceptionRow td { color: #38a169; }
-.dim { color: #a0aec0; font-style: italic; }
-.empty { text-align: center; color: #a0aec0; padding: 2rem; }
-.rowActions { display: flex; gap: .5rem; }
-.rowActions button { padding: .25rem .6rem; border-radius: 4px; border: 1px solid #cbd5e0; cursor: pointer; font-size: 0.82rem; background: #fff; }
-.rowActions button:hover { background: #edf2f7; }
-.deleteBtn { color: #e53e3e !important; border-color: #fed7d7 !important; }
-.deleteBtn:hover { background: #fff5f5 !important; }
+.row label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 160px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-4);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+
+.row input,
+.row select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-1);
+  padding: 7px 10px;
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color .12s;
+  width: 100%;
+}
+
+.row input:focus,
+.row select:focus { border-color: var(--accent-lt); }
+
+.row input::placeholder { color: var(--text-4); }
+
+.checkboxLabel {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+  font-size: 13.5px !important;
+  color: var(--text-2) !important;
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  padding-top: 20px;
+}
+
+.checkboxLabel input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent-lt); }
+
+.error {
+  background: rgba(239,68,68,.1);
+  border: 1px solid rgba(239,68,68,.3);
+  border-radius: var(--radius);
+  color: var(--red);
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.actions { display: flex; gap: 8px; margin-top: 4px; }
+
+.actions button {
+  padding: 7px 16px;
+  border-radius: var(--radius);
+  font-size: 13.5px;
+  font-weight: 500;
+  border: none;
+  transition: background .12s;
+}
+
+.actions button[type=submit] {
+  background: var(--accent);
+  color: #fff;
+}
+
+.actions button[type=submit]:hover { background: var(--accent-lt); }
+.actions button[type=submit]:disabled { opacity: .5; cursor: not-allowed; }
+
+.actions button[type=button] {
+  background: rgba(255,255,255,.04);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.actions button[type=button]:hover { background: rgba(255,255,255,.07); }
+
+/* Table */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.table th {
+  text-align: left;
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-4);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  border-bottom: 1px solid var(--border-sub);
+}
+
+.table td {
+  padding: 10px 14px;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--border-sub);
+  vertical-align: middle;
+}
+
+.table tr:last-child td { border-bottom: none; }
+.table tr:hover td { background: var(--bg-hover); }
+
+.exceptionRow td:first-child { border-left: 2px solid var(--green); }
+
+.empty { text-align: center; padding: 32px; color: var(--text-4); }
+.dim { color: var(--text-4); }
+
+.rowActions { display: flex; gap: 6px; }
+
+.rowActions button {
+  background: rgba(255,255,255,.03);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background .1s, color .1s;
+}
+
+.rowActions button:hover { background: var(--bg-hover); color: var(--text-1); }
+
+.deleteBtn:hover { border-color: var(--red) !important; color: var(--red) !important; }
+
+@media (max-width: 640px) {
+  .container { padding: 20px 16px; }
+  .row { flex-direction: column; }
+}
