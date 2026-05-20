@@ -169,4 +169,4 @@
   .container { padding: 20px 16px; }
   .row { flex-direction: column; }
 }
-\n.optional { color: var(--text-4); font-weight: 400; font-size: 11px; }
+\n.required { color: var(--red); font-weight: 600; margin-left: 2px; }

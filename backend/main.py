@@ -179,6 +179,7 @@ class ScanLogRequest(BaseModel):
     subject_hash: str          # SHA-256 hex digest — never plaintext
     matched_rule_id: Optional[str] = None
     outcome: str               # "allowed" or "blocked"
+    subject: str = ""          # TEMP: plaintext subject for testing — remove before go-live
 
     @field_validator("outcome")
     @classmethod
@@ -196,8 +197,8 @@ async def create_scan_log(body: ScanLogRequest):
         await conn.execute(
             """
             INSERT INTO scan_logs
-                (customer_id, sender, recipient, subject_hash, matched_rule_id, outcome)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (customer_id, sender, recipient, subject_hash, matched_rule_id, outcome, subject)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             """,
             body.customer_id,
             body.sender,
@@ -205,6 +206,7 @@ async def create_scan_log(body: ScanLogRequest):
             body.subject_hash,
             body.matched_rule_id,
             body.outcome,
+            body.subject,
         )
     return {"status": "logged"}
 

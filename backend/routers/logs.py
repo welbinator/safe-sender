@@ -17,6 +17,7 @@ class LogEntry(BaseModel):
     id: str
     sender: str
     recipient: str
+    subject: Optional[str]     # TEMP: plaintext for testing
     outcome: str
     matched_rule_id: Optional[str]
     matched_rule_name: Optional[str]
@@ -77,7 +78,7 @@ async def list_logs(
         rows = await conn.fetch(
             f"""
             SELECT
-                l.id, l.sender, l.recipient, l.outcome,
+                l.id, l.sender, l.recipient, l.subject, l.outcome,
                 l.matched_rule_id, l.created_at,
                 r.name        AS matched_rule_name,
                 r.pattern     AS matched_rule_pattern,
@@ -102,6 +103,7 @@ async def list_logs(
                 id=str(r["id"]),
                 sender=r["sender"],
                 recipient=r["recipient"],
+                subject=r["subject"],
                 outcome=r["outcome"],
                 matched_rule_id=str(r["matched_rule_id"]) if r["matched_rule_id"] else None,
                 matched_rule_name=r["matched_rule_name"],

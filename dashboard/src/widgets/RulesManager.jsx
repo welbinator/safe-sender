@@ -68,7 +68,7 @@ export default function RulesManager() {
         {error && <div className={styles.error}>{error}</div>}
         <div className={styles.row}>
           <label>
-            Rule Name <span className={styles.optional}>(optional)</span>
+            Rule Name
             <input
               value={form.name}
               onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
@@ -76,7 +76,7 @@ export default function RulesManager() {
             />
           </label>
           <label>
-            Pattern
+            <span>Pattern <span className={styles.required}>*</span></span>
             <input
               required
               value={form.pattern}
@@ -85,14 +85,14 @@ export default function RulesManager() {
             />
           </label>
           <label>
-            Match Type
+            <span>Match Type <span className={styles.required}>*</span></span>
             <select value={form.match_type} onChange={e => setForm(f => ({ ...f, match_type: e.target.value }))}>
               <option value="string">String (contains)</option>
               <option value="regex">Regex</option>
             </select>
           </label>
           <label>
-            Scope
+            <span>Scope <span className={styles.required}>*</span></span>
             <select value={form.scope} onChange={e => setForm(f => ({ ...f, scope: e.target.value }))}>
               <option value="both">Subject + Body</option>
               <option value="subject">Subject only</option>
@@ -102,7 +102,7 @@ export default function RulesManager() {
         </div>
         <div className={styles.row}> 
           <label>
-            Applies To (email, optional)
+            Applies To
             <input
               value={form.applies_to}
               onChange={e => setForm(f => ({ ...f, applies_to: e.target.value }))}
