@@ -8,7 +8,10 @@ Customer endpoints:
 """
 import os
 import secrets
+import smtplib
+import time
 from email.mime.text import MIMEText
+from typing import Any, Optional
 
 import asyncpg
 import bcrypt
