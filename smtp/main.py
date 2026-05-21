@@ -653,7 +653,8 @@ if __name__ == "__main__":
         authenticator=authenticator,
         auth_required=True,
         auth_require_tls=True,
-        ssl_context=ssl_context,
+        require_starttls=True,
+        tls_context=ssl_context,
     )
     controller587.start()
     logger.info(
