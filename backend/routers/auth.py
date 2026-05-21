@@ -4,19 +4,30 @@ POST /auth/google — exchange Google ID token for session JWT.
 Flow:
 1. Client obtains a Google ID token (via Google Sign-In JS lib).
 2. Client POSTs that token here.
-3. We verify it with Google's tokeninfo endpoint.
+3. We verify it with Google's tokeninfo endpoint (incl. hd-claim binding when
+   WORKSPACE_ONLY=1; see auth_utils.verify_google_id_token).
 4. We upsert a customer row keyed on google_sub.
 5. We return our own JWT session token.
+
+Sprint B hardening:
+  - C10: html.escape() in welcome email — no user input is interpolated into
+         HTML without escaping.
+  - H12: domain is derived from Google's verified `hd` claim only — the client
+         can no longer impersonate other Workspace domains via body.domain.
+  - H13: welcome email send moved off the request path via BackgroundTasks +
+         asyncio.to_thread so we never block the event loop on SES.
 """
+import html as _html
 import os
 import secrets
+import asyncio
 from typing import Optional
 
 import asyncpg
 import bcrypt
 import boto3
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from auth_utils import create_jwt, verify_google_id_token
 from deps import get_pool
@@ -28,8 +39,16 @@ FROM_EMAIL = os.environ.get("FROM_EMAIL", "noreply@sendersafety.com")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _send_welcome_email(to_email: str, name: str, domain: str) -> None:
-    """Fire-and-forget welcome email via SES. Silently swallows errors."""
+def _send_welcome_email_sync(to_email: str, name: str, domain: str) -> None:
+    """Send the welcome email via SES (synchronous boto3 call).
+
+    All untrusted strings (name, domain) are HTML-escaped before
+    interpolation into the HTML body. The plain-text body interpolates the
+    raw values (no escaping required there).
+    """
+    safe_name_html = _html.escape(name)
+    safe_domain_html = _html.escape(domain)
+
     subject = "Welcome to Sender Safety — let's get you set up"
     body_text = f"""Hi {name},
 
@@ -60,8 +79,8 @@ https://app.sendersafety.com
 
     body_html = f"""<html><body style="font-family:sans-serif;max-width:600px;margin:40px auto;color:#222;">
 <h2 style="color:#1a1a1a;">Welcome to Sender Safety 👋</h2>
-<p>Hi {name},</p>
-<p>You're one step away from protecting every email that leaves <strong>{domain}</strong>.</p>
+<p>Hi {safe_name_html},</p>
+<p>You're one step away from protecting every email that leaves <strong>{safe_domain_html}</strong>.</p>
 <h3>Here's what to do next:</h3>
 <ol>
   <li style="margin-bottom:12px;">
@@ -108,13 +127,18 @@ https://app.sendersafety.com
         print(f"[auth] Welcome email failed (non-fatal): {exc}", flush=True)
 
 
+async def _send_welcome_email_bg(to_email: str, name: str, domain: str) -> None:
+    """Run the blocking SES send in a worker thread so we never stall the loop."""
+    await asyncio.to_thread(_send_welcome_email_sync, to_email, name, domain)
+
 
 class GoogleAuthRequest(BaseModel):
-    id_token: str
-    # Optional: customer's Google Workspace domain (e.g. "acme.com")
-    # Sent by the dashboard after user selects their domain on first login.
-    domain: Optional[str] = None
-    company_name: Optional[str] = None
+    id_token: str = Field(..., max_length=4096)
+    # Optional: customer's Google Workspace domain (e.g. "acme.com").
+    # IGNORED for security — we trust Google's `hd` claim instead. Kept for
+    # backwards-compat with the client; do NOT use without re-verifying.
+    domain: Optional[str] = Field(default=None, max_length=253)
+    company_name: Optional[str] = Field(default=None, max_length=200)
 
 
 class AuthResponse(BaseModel):
@@ -138,13 +162,12 @@ def _generate_smtp_credentials() -> tuple[str, str, str]:
 @router.post("/google", response_model=AuthResponse)
 async def auth_google(
     body: GoogleAuthRequest,
+    background_tasks: BackgroundTasks,
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """
-    Verify Google ID token, upsert customer, return session JWT.
-    """
+    """Verify Google ID token, upsert customer, return session JWT."""
     # Test-mode bypass: ALLOW_TEST_TOKENS=1 lets tests pass fake claims as
-    # JSON-encoded id_token prefixed with "test:".  Never enable in prod.
+    # JSON-encoded id_token prefixed with "test:". Never enable in prod.
     if os.environ.get("ALLOW_TEST_TOKENS") == "1" and body.id_token.startswith("test:"):
         import json as _json
         claims = _json.loads(body.id_token[5:])
@@ -154,8 +177,10 @@ async def auth_google(
     google_sub = claims["sub"]
     email = claims["email"]
     name = claims.get("name", "")
-    # Derive domain from email if not explicitly supplied
-    domain = body.domain or email.split("@")[-1]
+    # SECURITY (H12): trust Google's verified `hd` claim — never body.domain.
+    # Falls back to email-derived domain only when WORKSPACE_ONLY is off
+    # (test/dev only — verify_google_id_token requires hd in prod).
+    domain = (claims.get("hd") or email.split("@")[-1]).lower()
     company_name = body.company_name or name
 
     async with pool.acquire() as conn:
@@ -163,13 +188,15 @@ async def auth_google(
         row = await conn.fetchrow(
             "SELECT id, email FROM customers WHERE google_sub = $1", google_sub
         )
+        smtp_username = None
+        smtp_raw_password = None
         if row:
             customer_id = str(row["id"])
             is_new = False
         else:
             # Check if someone already registered this domain under a different Google account
             domain_row = await conn.fetchrow(
-                "SELECT id FROM customers WHERE domain = $1", domain.lower()
+                "SELECT id FROM customers WHERE domain = $1", domain
             )
             if domain_row:
                 raise HTTPException(
@@ -188,7 +215,7 @@ async def auth_google(
                 VALUES ($1, $2, $3, $4, 'basic', $5, $6)
                 RETURNING id, email
                 """,
-                domain.lower(),
+                domain,
                 company_name,
                 email,
                 google_sub,
@@ -201,7 +228,10 @@ async def auth_google(
     token = create_jwt(customer_id, email)
 
     if is_new:
-        _send_welcome_email(email, name or email.split("@")[0], domain)
+        # H13: off the request path — runs after the response is sent.
+        background_tasks.add_task(
+            _send_welcome_email_bg, email, name or email.split("@")[0], domain
+        )
 
     return AuthResponse(
         access_token=token,

@@ -29,7 +29,7 @@ from typing import Optional
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from internal_auth import require_internal_secret
 
@@ -175,13 +175,13 @@ async def get_rules(domain: str):
 # ---------------------------------------------------------------------------
 
 class ScanLogRequest(BaseModel):
-    customer_id: str
-    sender: str
-    recipient: str
-    subject_hash: str          # SHA-256 hex digest — never plaintext
-    matched_rule_id: Optional[str] = None
-    outcome: str               # "allowed" or "blocked"
-    subject: str = ""          # TEMP: plaintext subject for testing — remove before go-live
+    customer_id: str = Field(..., max_length=64)
+    sender: str = Field(..., max_length=320)        # RFC 5321
+    recipient: str = Field(..., max_length=320)
+    subject_hash: str = Field(..., max_length=128)  # hex SHA-256
+    matched_rule_id: Optional[str] = Field(default=None, max_length=64)
+    outcome: str = Field(..., max_length=16)
+    subject: str = Field(default="", max_length=998)  # RFC 5322 line cap
 
     @field_validator("outcome")
     @classmethod

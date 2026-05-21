@@ -23,7 +23,7 @@ import ipaddress
 import json
 import logging
 import os
-import re
+import re as _stdlib_re  # kept ONLY for non-customer code paths
 import ssl
 import sys
 import time
@@ -34,6 +34,22 @@ import boto3
 import requests
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
+
+# google-re2 — RE2 has linear-time guarantees and is immune to ReDoS.
+# Used for all customer-supplied regex patterns. Stdlib re is unsafe here
+# because a single malicious pattern can pin the worker forever (Sprint B C9/H2).
+try:
+    import re2 as _customer_re  # type: ignore
+    _USING_RE2 = True
+except ImportError:  # pragma: no cover - dev fallback
+    _customer_re = _stdlib_re  # type: ignore
+    _USING_RE2 = False
+
+# Defensive cap (backend enforces too).
+MAX_PATTERN_LEN = 1000
+# Even RE2 is linear in input size; cap the input we feed to it so a
+# multi-megabyte body × many rules can't burn CPU.
+MAX_REGEX_INPUT_LEN = 65536
 
 # ---------------------------------------------------------------------------
 # Structured JSON logger
@@ -245,11 +261,22 @@ def _rule_matches(rule: dict, subject: str, body: str) -> bool:
             if pattern.lower() in text.lower():
                 return True
         elif match_type == "regex":
+            if len(pattern) > MAX_PATTERN_LEN:
+                logger.warning(
+                    "Rejecting oversized regex pattern",
+                    extra={"len": len(pattern), "rule_id": rule.get("id")},
+                )
+                continue
+            text_to_scan = text[:MAX_REGEX_INPUT_LEN]
             try:
-                if re.search(pattern, text, re.IGNORECASE):
+                if _customer_re.search(pattern, text_to_scan, _customer_re.IGNORECASE):
                     return True
-            except re.error as exc:
-                logger.warning("Invalid regex pattern", extra={"pattern": pattern, "error": str(exc)})
+            except Exception as exc:
+                # Catch broadly — re2 raises its own error type, not re.error.
+                logger.warning(
+                    "Invalid regex pattern",
+                    extra={"pattern": pattern, "error": str(exc)},
+                )
     return False
 
 

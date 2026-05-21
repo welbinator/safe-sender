@@ -6,6 +6,7 @@ Customer endpoints:
   POST   /customers/verify-domain/check — confirm TXT record is live in DNS
   POST   /customers/test-connection     — send a test email through our SMTP, wait for scan log
 """
+import asyncio
 import os
 import secrets
 import smtplib
@@ -167,7 +168,10 @@ async def verify_domain_check(
     found = False
 
     try:
-        answers = dns.resolver.resolve(f"_sendersafety.{domain}", "TXT")
+        # dns.resolver is blocking — off the event loop (H13).
+        answers = await asyncio.to_thread(
+            dns.resolver.resolve, f"_sendersafety.{domain}", "TXT"
+        )
         for rdata in answers:
             for txt_string in rdata.strings:
                 if txt_string.decode() == expected:
@@ -217,8 +221,10 @@ async def test_connection(
             "SELECT COUNT(*) FROM scan_logs WHERE customer_id = $1", customer["id"]
         )
 
-    # Send the test email via our own SMTP server
-    try:
+    # Send the test email via our own SMTP server. smtplib is blocking — push
+    # the whole conversation to a worker thread so the event loop stays
+    # responsive for other requests (H13).
+    def _send_blocking() -> None:
         msg = MIMEText("This is an automated connection test from Sender Safety.")
         msg["Subject"] = test_subject
         msg["From"] = test_sender
@@ -230,6 +236,9 @@ async def test_connection(
             if SMTP_AUTH_USERNAME and SMTP_AUTH_PASSWORD:
                 smtp.login(SMTP_AUTH_USERNAME, SMTP_AUTH_PASSWORD)
             smtp.sendmail(test_sender, [test_recipient], msg.as_string())
+
+    try:
+        await asyncio.to_thread(_send_blocking)
     except Exception as e:
         return TestConnectionResponse(
             success=False,
