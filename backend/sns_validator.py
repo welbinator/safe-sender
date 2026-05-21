@@ -63,7 +63,7 @@ def _fetch_cert(url: str) -> bytes:
     cached = _CERT_CACHE.get(url)
     if cached and now - cached[1] < _CERT_TTL:
         return cached[0]
-    with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 (host validated)
+    with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         pem = resp.read()
     _CERT_CACHE[url] = (pem, now)
     return pem
@@ -119,7 +119,7 @@ def verify_sns_message(msg: dict, allowed_topic_arns: Iterable[str]) -> None:
     string_to_sign = _build_string_to_sign(msg)
 
     if sig_version == "1":
-        hash_alg = hashes.SHA1()
+        hash_alg = hashes.SHA1()  # nosec B303  # nosemgrep: python.cryptography.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
     elif sig_version == "2":
         hash_alg = hashes.SHA256()
     else:

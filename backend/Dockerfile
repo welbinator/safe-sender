@@ -11,4 +11,9 @@ COPY entrypoint.sh /entrypoint.sh
 COPY entrypoint.py /entrypoint.py
 RUN chmod +x /entrypoint.sh
 
+# Run as non-root for least privilege.
+RUN useradd --create-home --shell /bin/bash --uid 10001 app \
+    && chown -R app:app /app
+USER app
+
 ENTRYPOINT ["python3", "/entrypoint.py"]

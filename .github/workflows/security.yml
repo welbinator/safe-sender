@@ -46,4 +46,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # p/python, p/security-audit, p/secrets, p/owasp-top-ten — all OSS rulesets.
-      - run: semgrep ci --config=p/python --config=p/security-audit --config=p/secrets --config=p/owasp-top-ten --error
+      - run: semgrep scan --config=p/python --config=p/security-audit --config=p/secrets --config=p/owasp-top-ten --error

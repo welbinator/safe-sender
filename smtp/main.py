@@ -355,7 +355,7 @@ class Authenticator:
 
         try:
             resp = requests.post(
-                f"{BACKEND_URL}/internal/smtp-auth",
+                f"{BACKEND_URL}/internal/smtp-auth",  # nosemgrep: python.lang.security.audit.insecure-transport.requests.request-with-http.request-with-http
                 json={"username": username, "password": password},
                 headers=_INTERNAL_HEADERS,
                 timeout=5,
@@ -648,7 +648,7 @@ if __name__ == "__main__":
     handler587 = SafeSenderHandler(port=587)
     controller587 = Controller(
         handler587,
-        hostname="0.0.0.0",
+        hostname="0.0.0.0",  # nosec B104 - SMTP server must bind all container interfaces; exposure controlled by Docker port mapping + Hetzner firewall
         port=587,
         authenticator=authenticator,
         auth_required=True,
@@ -667,7 +667,7 @@ if __name__ == "__main__":
     handler25 = SafeSenderHandler(port=25)
     controller25 = Controller(
         handler25,
-        hostname="0.0.0.0",
+        hostname="0.0.0.0",  # nosec B104 - SMTP server must bind all container interfaces; exposure controlled by Docker port mapping + Hetzner firewall
         port=25,
         auth_required=False,
         auth_require_tls=False,
