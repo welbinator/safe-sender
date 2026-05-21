@@ -1,16 +1,19 @@
 """
-FastAPI dependency: extract and validate the current customer from the
-Authorization: Bearer <jwt> header.
+FastAPI dependencies for auth + DB.
+
+Auth (Sprint B C13): the preferred transport is the HttpOnly `session` cookie
+set by POST /auth/google. We also accept `Authorization: Bearer <jwt>` as a
+fallback so non-browser API clients and the transition window keep working —
+this is gated by ALLOW_BEARER_AUTH (default "1"). Flip to "0" after the
+frontend has fully moved to cookies.
 """
-from typing import Any
+import os
+from typing import Any, Optional
 
 import asyncpg
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Cookie, Depends, HTTPException, Request, status
 
 from auth_utils import decode_jwt
-
-bearer_scheme = HTTPBearer()
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -22,20 +25,39 @@ async def get_pool() -> asyncpg.Pool:
     return _get_pool()
 
 
+def _extract_token(request: Request, session_cookie: Optional[str]) -> str:
+    """Cookie first, then Authorization header (when allowed). 401 otherwise."""
+    if session_cookie:
+        return session_cookie
+    if os.environ.get("ALLOW_BEARER_AUTH", "1") == "1":
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth.split(" ", 1)[1].strip()
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 async def get_current_customer(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    request: Request,
+    session: Optional[str] = Cookie(default=None),
     pool: asyncpg.Pool = Depends(get_pool),
 ) -> dict[str, Any]:
+    """Validate session and return the customer row.
+
+    Raises 401 if the token is missing or invalid, 404 if the customer no
+    longer exists or is deactivated.
     """
-    Dependency that:
-    1. Validates the JWT from the Authorization header.
-    2. Loads and returns the customer row from Postgres.
-    Raises 401 if token is invalid, 404 if customer no longer exists.
-    """
-    payload = decode_jwt(credentials.credentials)
+    token = _extract_token(request, session)
+    payload = decode_jwt(token)
     customer_id = payload.get("sub")
     if not customer_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+        )
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -43,6 +65,8 @@ async def get_current_customer(
             customer_id,
         )
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
-
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer not found",
+        )
     return dict(row)

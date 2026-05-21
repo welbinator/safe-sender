@@ -1,6 +1,9 @@
-
 import { createContext, useContext, useState, useEffect } from 'react';
-import { getMe } from './api';
+import { getMe, authLogout } from './api';
+
+// Sprint B C13: cookie-based auth. We don't hold the JWT — it lives in an
+// HttpOnly cookie. To check whether we're logged in, we just call /me and
+// see whether it returns 200 or 401. No localStorage, no token state.
 
 const AuthContext = createContext(null);
 
@@ -9,22 +12,21 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token) { setLoading(false); return; }
     getMe()
       .then(r => setCustomer(r.data))
-      .catch(() => localStorage.removeItem('token'))
+      .catch(() => setCustomer(null))
       .finally(() => setLoading(false));
   }, []);
 
-  const login = (token, customerData) => {
-    localStorage.setItem('token', token);
+  // login() is called by the Google callback AFTER the server set the cookie.
+  const login = (customerData) => {
     setCustomer(customerData);
   };
 
-  const logout = () => {
-    localStorage.removeItem('token');
+  const logout = async () => {
+    try { await authLogout(); } catch (_) { /* best-effort */ }
     setCustomer(null);
+    window.location.href = '/login';
   };
 
   return (

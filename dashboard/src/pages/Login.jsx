@@ -23,7 +23,11 @@ export default function Login() {
   const { login, customer } = useAuth();
   const navigate = useNavigate();
   const btnRef = useRef(null);
-  const [smtpCreds, setSmtpCreds] = useState(null);
+  // Sprint B C13: server no longer returns smtp_password at signup. New
+  // users see a "Generate SMTP password" prompt that calls the rotate
+  // endpoint on demand. We just track whether this signup is a brand-new
+  // account so we can route accordingly.
+  const [showSmtpSetup, setShowSmtpSetup] = useState(false);
 
   useEffect(() => {
     if (!GOOGLE_CLIENT_ID) return;
@@ -31,9 +35,10 @@ export default function Login() {
     const onCredential = async ({ credential }) => {
       try {
         const res = await authGoogle(credential);
-        login(res.data.access_token, { id: res.data.customer_id, email: res.data.email });
-        if (res.data.is_new && res.data.smtp_username && res.data.smtp_password) {
-          setSmtpCreds({ username: res.data.smtp_username, password: res.data.smtp_password });
+        // Cookie is already set by the server. We just commit the customer.
+        login({ id: res.data.customer_id, email: res.data.email });
+        if (res.data.is_new) {
+          setShowSmtpSetup(true);
         } else {
           navigate('/');
         }
@@ -43,19 +48,18 @@ export default function Login() {
       }
     };
 
-    if (window.google?.accounts) {
-      // Script already loaded
-      initGoogleButton(btnRef, onCredential);
-    } else {
-      // Wait for script to load
-      // Find the GSI script by iterating (querySelector with slashes in attr value is tricky)
-      const scripts = Array.from(document.querySelectorAll('script[src]'));
-      const existing = scripts.find(s => s.src && s.src.includes('accounts.google.com/gsi/client'));
-      if (existing) {
-        existing.addEventListener('load', () => initGoogleButton(btnRef, onCredential));
+    // The GIS script is loaded statically from index.html (Sprint B C14).
+    // It usually arrives before React mounts; if not, poll briefly.
+    const start = Date.now();
+    const tryInit = () => {
+      if (window.google?.accounts?.id) {
+        initGoogleButton(btnRef, onCredential);
+      } else if (Date.now() - start < 5000) {
+        setTimeout(tryInit, 100);
       }
-    }
-  }, [customer, smtpCreds]);
+    };
+    tryInit();
+  }, [customer]);
 
   return (
     <div className={styles.page}>
@@ -69,11 +73,9 @@ export default function Login() {
         )}
       </div>
 
-      {smtpCreds && (
+      {showSmtpSetup && (
         <SmtpWelcomeModal
-          username={smtpCreds.username}
-          password={smtpCreds.password}
-          onDone={() => { setSmtpCreds(null); navigate('/'); }}
+          onDone={() => { setShowSmtpSetup(false); navigate('/'); }}
         />
       )}
     </div>

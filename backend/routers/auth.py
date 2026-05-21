@@ -26,7 +26,7 @@ from typing import Optional
 import asyncpg
 import bcrypt
 import boto3
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from auth_utils import create_jwt, verify_google_id_token
@@ -142,13 +142,14 @@ class GoogleAuthRequest(BaseModel):
 
 
 class AuthResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+    # Sprint B C13: the JWT itself is now delivered via HttpOnly cookie, never
+    # in the response body. SMTP plaintext password is no longer returned at
+    # signup — the user calls POST /customers/me/smtp-credentials/rotate to
+    # mint one. `is_new=true` triggers the "show rotate prompt" UX.
     customer_id: str
     email: str
     is_new: bool
     smtp_username: Optional[str] = None
-    smtp_password: Optional[str] = None  # plaintext, returned once on signup only
 
 
 def _generate_smtp_credentials() -> tuple[str, str, str]:
@@ -163,6 +164,7 @@ def _generate_smtp_credentials() -> tuple[str, str, str]:
 async def auth_google(
     body: GoogleAuthRequest,
     background_tasks: BackgroundTasks,
+    response: Response,
     pool: asyncpg.Pool = Depends(get_pool),
 ):
     """Verify Google ID token, upsert customer, return session JWT."""
@@ -227,6 +229,19 @@ async def auth_google(
 
     token = create_jwt(customer_id, email)
 
+    # Sprint B C13: HttpOnly session cookie. JS can't read it, so XSS can't
+    # steal the JWT. SameSite=Lax + Secure prevents CSRF on the dominant
+    # vectors. Path=/ so every API route sees it. 7-day life mirrors the JWT.
+    response.set_cookie(
+        key="session",
+        value=token,
+        max_age=60 * 60 * 24 * 7,
+        path="/",
+        httponly=True,
+        secure=os.environ.get("COOKIE_INSECURE") != "1",
+        samesite="lax",
+    )
+
     if is_new:
         # H13: off the request path — runs after the response is sent.
         background_tasks.add_task(
@@ -234,10 +249,17 @@ async def auth_google(
         )
 
     return AuthResponse(
-        access_token=token,
         customer_id=customer_id,
         email=email,
         is_new=is_new,
         smtp_username=smtp_username if is_new else None,
-        smtp_password=smtp_raw_password if is_new else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/logout — clears the session cookie. Idempotent.
+# ---------------------------------------------------------------------------
+@router.post("/logout", status_code=204)
+async def auth_logout(response: Response):
+    response.delete_cookie("session", path="/")
+    return Response(status_code=204)
