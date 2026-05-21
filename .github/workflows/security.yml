@@ -1,0 +1,49 @@
+name: security
+
+on:
+  push:
+    branches: [main, develop, sprint-a-security]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  bandit:
+    name: Bandit (Python static analysis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install bandit==1.7.10
+      # -ll = report MEDIUM+ severity, -ii = MEDIUM+ confidence.
+      # No "|| true": failures must break the build.
+      - run: bandit -r backend smtp -ll -ii -x backend/tests,smtp/tests
+
+  pip_audit:
+    name: pip-audit (dependency CVEs)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, smtp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit==2.7.3
+      - run: pip-audit -r ${{ matrix.component }}/requirements.txt --strict
+
+  semgrep:
+    name: Semgrep (SAST)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+      # p/python, p/security-audit, p/secrets, p/owasp-top-ten — all OSS rulesets.
+      - run: semgrep ci --config=p/python --config=p/security-audit --config=p/secrets --config=p/owasp-top-ten --error
