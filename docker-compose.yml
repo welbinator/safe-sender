@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-sendersafety}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,8 +17,9 @@ services:
 
   backend:
     build: ./backend
+    # Bind to loopback only — nginx is the only thing that should reach the API.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     restart: on-failure
     depends_on:
       postgres:
@@ -26,6 +27,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://sendersafety:changeme@postgres:5432/sendersafety}
       JWT_SECRET: ${JWT_SECRET:-changeme}
+      INTERNAL_SHARED_SECRET: ${INTERNAL_SHARED_SECRET:-}
+      SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       ALLOW_TEST_TOKENS: ${ALLOW_TEST_TOKENS:-0}
@@ -47,6 +50,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://sendersafety:changeme@postgres:5432/sendersafety}
       BACKEND_URL: http://backend:8000
+      INTERNAL_SHARED_SECRET: ${INTERNAL_SHARED_SECRET:-}
+      PORT25_ALLOWED_CIDRS: ${PORT25_ALLOWED_CIDRS:-}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
