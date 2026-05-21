@@ -21,7 +21,15 @@ from main import get_pool
 
 logger = logging.getLogger(__name__)
 
+import hmac
+
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+_WEAK_ADMIN = {"", "changeme", "secret", "password", "admin", "default"}
+if ADMIN_SECRET and (ADMIN_SECRET.lower() in _WEAK_ADMIN or len(ADMIN_SECRET) < 32):
+    raise RuntimeError(
+        "ADMIN_SECRET is weak/default/short (<32 chars). "
+        "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+    )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 _bearer = HTTPBearer(auto_error=False)
@@ -30,7 +38,9 @@ _bearer = HTTPBearer(auto_error=False)
 def _require_admin(credentials: HTTPAuthorizationCredentials = Depends(_bearer)):
     if not ADMIN_SECRET:
         raise HTTPException(status_code=503, detail="Admin panel not configured")
-    if not credentials or credentials.credentials != ADMIN_SECRET:
+    if not credentials or not hmac.compare_digest(
+        credentials.credentials or "", ADMIN_SECRET
+    ):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
 

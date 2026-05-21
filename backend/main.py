@@ -28,8 +28,10 @@ import os
 from typing import Optional
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
+
+from internal_auth import require_internal_secret
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://sendersafety:changeme@postgres:5432/sendersafety"
@@ -127,7 +129,7 @@ async def health() -> dict:
 # GET /internal/rules/{domain}
 # ---------------------------------------------------------------------------
 
-@app.get("/internal/rules/{domain}")
+@app.get("/internal/rules/{domain}", dependencies=[Depends(require_internal_secret)])
 async def get_rules(domain: str):
     """
     Return customer_id and active rules for a given sender domain.
@@ -189,7 +191,7 @@ class ScanLogRequest(BaseModel):
         return v
 
 
-@app.post("/internal/scan-log", status_code=201)
+@app.post("/internal/scan-log", status_code=201, dependencies=[Depends(require_internal_secret)])
 async def create_scan_log(body: ScanLogRequest):
     """Insert a scan log row. Email content is never stored."""
     pool = get_pool()
@@ -215,7 +217,7 @@ async def create_scan_log(body: ScanLogRequest):
 # GET /internal/suppressed/{email}
 # ---------------------------------------------------------------------------
 
-@app.get("/internal/suppressed/{email}")
+@app.get("/internal/suppressed/{email}", dependencies=[Depends(require_internal_secret)])
 async def check_suppressed(email: str):
     """Returns 200 if address is suppressed, 404 if not."""
     pool = get_pool()
@@ -230,15 +232,25 @@ async def check_suppressed(email: str):
 
 
 # ---------------------------------------------------------------------------
-# GET /internal/smtp-auth  — called by SMTP server to verify credentials
+# POST /internal/smtp-auth  — called by SMTP server to verify credentials
 # ---------------------------------------------------------------------------
 
-@app.get("/internal/smtp-auth")
-async def smtp_auth(username: str, password: str):
+class SmtpAuthRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/internal/smtp-auth", dependencies=[Depends(require_internal_secret)])
+async def smtp_auth(body: SmtpAuthRequest):
     """
     Verify SMTP credentials. Returns customer info on success, 401 on failure.
     Also accepts global AUTH_USERNAME/AUTH_PASSWORD env vars as admin fallback.
+
+    Body is POSTed (not query params) so credentials never appear in access logs.
     """
+    username = body.username
+    password = body.password
+
     # Admin/test fallback
     admin_user = os.environ.get("AUTH_USERNAME", "")
     admin_pass = os.environ.get("AUTH_PASSWORD", "")

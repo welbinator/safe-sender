@@ -19,16 +19,19 @@ import asyncio
 import collections
 import email as email_lib
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
 import ssl
+import sys
 import time
 from email import policy as email_policy
 
 import aiohttp
 import boto3
+import requests
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
 
@@ -71,6 +74,34 @@ AUTH_USERNAME = os.environ.get("AUTH_USERNAME", "")
 AUTH_PASSWORD = os.environ.get("AUTH_PASSWORD", "")
 TLS_CERT_PATH = os.environ.get("TLS_CERT_PATH", "")
 TLS_KEY_PATH = os.environ.get("TLS_KEY_PATH", "")
+
+# Shared secret used to authenticate this SMTP service to the backend's
+# /internal/* endpoints. Sent as X-Internal-Secret header.
+INTERNAL_SHARED_SECRET = os.environ.get("INTERNAL_SHARED_SECRET", "")
+_WEAK_SECRETS = {"", "changeme", "secret", "password", "default", "test"}
+if INTERNAL_SHARED_SECRET in _WEAK_SECRETS or len(INTERNAL_SHARED_SECRET) < 32:
+    sys.stderr.write(
+        "FATAL: INTERNAL_SHARED_SECRET must be set and at least 32 chars. "
+        "Refusing to start.\n"
+    )
+    sys.exit(1)
+_INTERNAL_HEADERS = {"X-Internal-Secret": INTERNAL_SHARED_SECRET}
+
+# Comma-separated CIDR ranges allowed to connect on port 25 (Google SMTP relay
+# MTA->MTA). Defaults to Google's published _spf.google.com ranges as of 2025;
+# operators should keep this updated via env.
+DEFAULT_GOOGLE_RELAY_RANGES = (
+    "35.190.247.0/24,64.233.160.0/19,66.102.0.0/20,66.249.80.0/20,"
+    "72.14.192.0/18,74.125.0.0/16,108.177.8.0/21,108.177.96.0/19,"
+    "172.217.0.0/19,172.217.32.0/20,172.217.128.0/19,172.217.160.0/20,"
+    "172.217.192.0/19,173.194.0.0/16,209.85.128.0/17,216.58.192.0/19,"
+    "216.239.32.0/19"
+)
+PORT25_ALLOWED_CIDRS = os.environ.get("PORT25_ALLOWED_CIDRS", DEFAULT_GOOGLE_RELAY_RANGES)
+_PORT25_NETWORKS = [
+    ipaddress.ip_network(c.strip(), strict=False)
+    for c in PORT25_ALLOWED_CIDRS.split(",") if c.strip()
+]
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
@@ -228,8 +259,8 @@ async def _fetch_rules(domain: str) -> dict | None:
     Returns dict with 'customer_id' and 'rules', or None if domain not found.
     """
     url = f"{BACKEND_URL}/internal/rules/{domain}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
+    async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS) as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status in (404, 403):
                 return None
             resp.raise_for_status()
@@ -240,8 +271,8 @@ async def _is_suppressed(recipient: str) -> bool:
     """Check if a recipient address is in the suppression list."""
     url = f"{BACKEND_URL}/internal/suppressed/{recipient.lower().strip('<>')}"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
+        async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 if resp.status == 200:
                     return True
                 return False
@@ -271,8 +302,8 @@ async def _log_scan(
         "subject": subject,
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as resp:
+        async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS) as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status not in (200, 201):
                     body = await resp.text()
                     logger.error("scan-log POST failed", extra={"status": resp.status, "body": body})
@@ -306,6 +337,14 @@ class Authenticator:
     """
     Authenticates SMTP clients by verifying credentials against the backend DB.
     Falls back to AUTH_USERNAME/AUTH_PASSWORD env vars for admin/testing.
+
+    NOTE: aiosmtpd calls this as a sync callable from inside the running event
+    loop. Calling loop.run_until_complete here deadlocks. We use the sync
+    `requests` library — auth requests are short, infrequent, and block only
+    the single auth connection (aiosmtpd handles each connection in a separate
+    coroutine, but blocking I/O still stalls the whole loop). For low auth
+    volume this is acceptable; switch to a thread executor if AUTH becomes
+    a hot path.
     """
 
     def __call__(self, server, session, envelope, mechanism, auth_data):
@@ -314,28 +353,26 @@ class Authenticator:
         username = auth_data.login.decode() if isinstance(auth_data.login, bytes) else auth_data.login
         password = auth_data.password.decode() if isinstance(auth_data.password, bytes) else auth_data.password
 
-        # Run async DB lookup in the event loop
-        loop = asyncio.get_event_loop()
-        result = loop.run_until_complete(self._verify(username, password))
-        if result:
-            # Stash customer info on session for use in handle_DATA
-            session.smtp_customer_id = result.get("customer_id")
-            session.smtp_domain = result.get("domain")
-            return AuthResult(success=True)
-        logger.warning("AUTH failed", extra={"user": username})
-        return AuthResult(success=False, handled=True)
-
-    async def _verify(self, username: str, password: str) -> dict | None:
-        url = f"{BACKEND_URL}/internal/smtp-auth"
         try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.get(url, params={"username": username, "password": password}) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    return None
+            resp = requests.post(
+                f"{BACKEND_URL}/internal/smtp-auth",  # nosemgrep: python.lang.security.audit.insecure-transport.requests.request-with-http.request-with-http
+                json={"username": username, "password": password},
+                headers=_INTERNAL_HEADERS,
+                timeout=5,
+            )
         except Exception as exc:
             logger.error("Auth backend unreachable", extra={"error": str(exc)})
-            return None
+            return AuthResult(success=False, handled=True, message="451 4.7.0 Auth backend unavailable")
+
+        if resp.status_code != 200:
+            logger.warning("AUTH failed", extra={"user": username, "status": resp.status_code})
+            return AuthResult(success=False, handled=True)
+
+        result = resp.json()
+        session.smtp_customer_id = result.get("customer_id")
+        session.smtp_domain = result.get("domain")
+        session.smtp_admin = result.get("admin", False)
+        return AuthResult(success=True)
 
 
 # ---------------------------------------------------------------------------
@@ -346,15 +383,32 @@ class SafeSenderHandler:
     """
     aiosmtpd DATA handler.
 
+    One instance is bound to each listening port so we can apply
+    port-specific policy (port 25 = MTA relay with peer-IP allowlist;
+    port 587 = authenticated client with From-domain binding).
+
     Flow:
-      1. Extract sender domain from MAIL FROM.
-      2. Fetch customer rules from backend.
-      3. Check per-customer rate limit.
-      4. Parse email in memory.
-      5. Evaluate each rule.
-      6. Block (550) or forward via SES.
-      7. Log outcome.
+      1. Port-specific gate (peer-IP allowlist OR auth required).
+      2. Extract sender domain from MAIL FROM.
+      3. Fetch customer rules from backend.
+      4. Check per-customer rate limit.
+      5. Parse email in memory.
+      6. Evaluate each rule.
+      7. Block (550) or forward via SES.
+      8. Log outcome.
     """
+
+    def __init__(self, port: int):
+        self.port = port
+
+    def _peer_allowed_on_port25(self, peer) -> bool:
+        if not peer:
+            return False
+        try:
+            ip = ipaddress.ip_address(peer[0])
+        except (ValueError, IndexError):
+            return False
+        return any(ip in net for net in _PORT25_NETWORKS)
 
     async def handle_RCPT(self, server, session, envelope, address: str, rcpt_options: list) -> str:
         envelope.rcpt_tos.append(address)
@@ -366,7 +420,30 @@ class SafeSenderHandler:
         raw_content: bytes = envelope.content if isinstance(envelope.content, bytes) else envelope.content.encode()
 
         domain = _extract_domain(mail_from)
-        logger.info("Incoming email", extra={"domain": domain, "to": rcpt_tos})
+        peer_ip = session.peer[0] if session.peer else "unknown"
+        logger.info("Incoming email", extra={"port": self.port, "peer": peer_ip, "domain": domain, "to": rcpt_tos})
+
+        # --- Port-specific access control ------------------------------------
+        if self.port == 25:
+            if not self._peer_allowed_on_port25(session.peer):
+                logger.warning(
+                    "Port 25 connection from non-allowlisted IP — rejected",
+                    extra={"peer": peer_ip, "domain": domain},
+                )
+                return "550 5.7.1 Connections only accepted from authorized relay IPs"
+        else:
+            # Port 587: must be authenticated
+            if not getattr(session, "smtp_customer_id", None) and not getattr(session, "smtp_admin", False):
+                return "530 5.7.0 Authentication required"
+            # Bind MAIL FROM domain to the authenticated customer's domain (unless admin)
+            if not getattr(session, "smtp_admin", False):
+                auth_domain = (getattr(session, "smtp_domain", "") or "").lower()
+                if auth_domain and domain != auth_domain:
+                    logger.warning(
+                        "From-domain mismatch — rejected",
+                        extra={"auth_domain": auth_domain, "from_domain": domain, "peer": peer_ip},
+                    )
+                    return "550 5.7.1 Sender domain does not match authenticated account"
 
         # --- Test connection emails: sendersafety-test@<domain> ---
         local_part = mail_from.strip("<>").split("@")[0].lower()
@@ -532,53 +609,74 @@ class SafeSenderHandler:
 # ---------------------------------------------------------------------------
 
 def build_ssl_context() -> ssl.SSLContext | None:
-    """Return an SSL context if TLS cert/key paths are configured."""
+    """Return an SSL context if TLS cert/key paths are configured.
+
+    Fails fast if TLS paths are set but unreadable — production must not
+    silently fall back to plaintext.
+    """
     if not TLS_CERT_PATH or not TLS_KEY_PATH:
-        logger.warning("TLS not configured — running without TLS")
         return None
     if not os.path.exists(TLS_CERT_PATH) or not os.path.exists(TLS_KEY_PATH):
-        logger.warning("TLS cert/key files not found — running without TLS")
-        return None
-    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    ctx.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
+        sys.stderr.write(
+            f"FATAL: TLS_CERT_PATH or TLS_KEY_PATH set but file not found "
+            f"(cert={TLS_CERT_PATH}, key={TLS_KEY_PATH}). Refusing to start.\n"
+        )
+        sys.exit(1)
+    try:
+        ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ctx.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
+    except Exception as exc:
+        sys.stderr.write(f"FATAL: failed to load TLS cert/key: {exc}\n")
+        sys.exit(1)
     return ctx
 
 
 if __name__ == "__main__":
-    handler = SafeSenderHandler()
     authenticator = Authenticator()
-
     ssl_context = build_ssl_context()
 
-    # Port 587 - authenticated (direct SMTP clients)
-    controller_kwargs = dict(
-        hostname="0.0.0.0",
+    # Port 587 - authenticated direct SMTP clients. STARTTLS REQUIRED in prod.
+    # auth_require_tls defaults to True; if no TLS context, refuse to start
+    # so we never accept plaintext-AUTH from the public internet.
+    if ssl_context is None:
+        sys.stderr.write(
+            "FATAL: port 587 requires TLS. Set TLS_CERT_PATH and TLS_KEY_PATH. "
+            "Refusing to start.\n"
+        )
+        sys.exit(1)
+
+    handler587 = SafeSenderHandler(port=587)
+    controller587 = Controller(
+        handler587,
+        hostname="0.0.0.0",  # nosec B104 - SMTP server must bind all container interfaces; exposure controlled by Docker port mapping + Hetzner firewall
         port=587,
         authenticator=authenticator,
         auth_required=True,
-        auth_require_tls=False,
+        auth_require_tls=True,
+        require_starttls=True,
+        tls_context=ssl_context,
     )
-    if ssl_context:
-        controller_kwargs["ssl_context"] = ssl_context
-        logger.info("TLS enabled", extra={"cert": TLS_CERT_PATH})
-
-    controller587 = Controller(handler, **controller_kwargs)
     controller587.start()
     logger.info(
-        "Safe Sender SMTP server started (port 587, auth required)",
+        "Safe Sender SMTP started (port 587, AUTH required, TLS enforced)",
         extra={"port": 587, "rate_limit_max": RATE_LIMIT_MAX, "rate_limit_window": RATE_LIMIT_WINDOW},
     )
 
-    # Port 25 - no auth (Google Workspace MTA-to-MTA outbound gateway)
+    # Port 25 - MTA-to-MTA inbound from Google Workspace SMTP relay.
+    # No SMTP-AUTH (peer-IP allowlist enforced inside handle_DATA).
+    handler25 = SafeSenderHandler(port=25)
     controller25 = Controller(
-        handler,
-        hostname="0.0.0.0",
+        handler25,
+        hostname="0.0.0.0",  # nosec B104 - SMTP server must bind all container interfaces; exposure controlled by Docker port mapping + Hetzner firewall
         port=25,
         auth_required=False,
         auth_require_tls=False,
     )
     controller25.start()
-    logger.info("Safe Sender SMTP server started (port 25, no auth - MTA relay)", extra={"port": 25})
+    logger.info(
+        "Safe Sender SMTP started (port 25, no AUTH, peer-IP allowlist)",
+        extra={"port": 25, "allowed_networks": len(_PORT25_NETWORKS)},
+    )
 
     try:
         asyncio.get_event_loop().run_forever()

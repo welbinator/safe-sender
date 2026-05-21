@@ -76,4 +76,4 @@ if __name__ == "__main__":
 
     # Replace this process with uvicorn
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, loop="asyncio")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, loop="asyncio")  # nosec B104 - container binding; exposure controlled by Docker port mapping

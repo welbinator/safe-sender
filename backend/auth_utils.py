@@ -9,8 +9,18 @@ import httpx
 import jwt
 from fastapi import HTTPException, status
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "changeme")
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
 JWT_ALGORITHM = "HS256"
+
+# Fail fast on weak or default secrets. Anything < 32 chars or matching a
+# well-known default is rejected at import time. This prevents accidentally
+# running with the literal "changeme" placeholder in production.
+_WEAK_SECRETS = {"", "changeme", "secret", "password", "default", "test"}
+if JWT_SECRET.lower() in _WEAK_SECRETS or len(JWT_SECRET) < 32:
+    raise RuntimeError(
+        "JWT_SECRET is missing, default, or shorter than 32 chars. "
+        "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+    )
 JWT_EXPIRE_DAYS = 30
 
 GOOGLE_TOKEN_INFO_URL = "https://oauth2.googleapis.com/tokeninfo"
