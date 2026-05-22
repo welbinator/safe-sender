@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
-import json
 import logging
 import os
 import time
@@ -36,7 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from deps import get_admin_service
-from main import get_pool
+from db import get_pool
 from services import AdminService, NotFoundError
 
 logger = logging.getLogger(__name__)
@@ -69,11 +68,23 @@ _RATE_LIMIT_PER_MIN = int(os.environ.get("ADMIN_RATE_LIMIT_PER_MIN", "30"))
 
 
 def _client_ip(request: Request) -> str:
-    """Return the request's client IP, trusting X-Forwarded-For only when set
-    by our own nginx (we always set it on /api/admin/* in nginx.conf)."""
+    """Return the request's client IP.
+
+    F-18: nginx uses ``proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for``
+    which *appends* to whatever the client sent. Trusting the first hop lets an
+    attacker spoof the admin allowlist / rate-limit key. We instead prefer
+    ``X-Real-IP`` (which nginx overwrites with ``$remote_addr``) and fall back to
+    the *last* hop of XFF — the address closest to our trust boundary — never
+    the first.
+    """
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
-        return xff.split(",")[0].strip()
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     if request.client:
         return request.client.host
     return "unknown"
@@ -114,6 +125,9 @@ def _check_rate_limit(ip: str) -> bool:
 # dependency gets the pool directly and writes through asyncpg. The repository
 # class is the only thing that knows the SQL — we mirror that here as a single
 # parameterized INSERT to avoid duplicating it. ──────────────────────────────
+# F-14 / F-21: route the dependency-level audit through the service layer too,
+# so there is exactly one INSERT statement for admin_audit_log in the codebase
+# (in AdminAuditRepository) and the router is data-access free.
 async def _audit_from_dependency(
     ip: str, method: str, path: str, status_code: int, detail: Optional[dict] = None
 ) -> None:
@@ -121,13 +135,18 @@ async def _audit_from_dependency(
     try:
         pool = get_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO admin_audit_log (ip, method, path, status_code, detail)
-                VALUES ($1, $2, $3, $4, $5::jsonb)
-                """,
-                ip, method, path, status_code,
-                json.dumps(detail) if detail else None,
+            from repositories import AdminAuditRepository, SuppressionRepository
+            from services.admin import AdminService
+            admin = AdminService(
+                admin_audit=AdminAuditRepository(conn),
+                suppressions=SuppressionRepository(conn),
+            )
+            await admin.write_audit(
+                ip=ip,
+                method=method,
+                path=path,
+                status_code=status_code,
+                detail=detail,
             )
     except Exception:  # never let audit failures break the admin response
         logger.exception("admin: failed to write audit log")
