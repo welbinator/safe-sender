@@ -22,6 +22,11 @@ jobs:
         # requirements-dev.txt pulls in requirements.txt + pytest + pgserver
         # (which ships its own postgres binaries — no system packages needed).
         run: pip install -r requirements-dev.txt
+      - name: Syntax check (compileall)
+        # Sprint C1 t9: cheap pre-test gate. Catches SyntaxError in seconds
+        # before pytest spends 13s spinning up pgserver. Pure syntax — does
+        # not execute module bodies, so no env vars required.
+        run: python -m compileall -q -f .
       - name: Run tests
         # H-1: NO `|| true`. Test failures must fail the build.
         run: pytest tests/ --tb=short
