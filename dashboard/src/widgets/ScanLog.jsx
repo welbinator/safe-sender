@@ -84,24 +84,22 @@ export default function ScanLog() {
               <th>Time</th>
               <th>From</th>
               <th>To</th>
-              <th>Subject</th>
               <th>Outcome</th>
               <th>Rule Triggered</th>
             </tr>
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={6} className={styles.loading}>Loading…</td></tr>
+              <tr><td colSpan={5} className={styles.loading}>Loading…</td></tr>
             )}
             {!loading && logs.length === 0 && (
-              <tr><td colSpan={6} className={styles.empty}>No logs found.</td></tr>
+              <tr><td colSpan={5} className={styles.empty}>No logs found.</td></tr>
             )}
-            {!loading && logs.map((log, i) => (
-              <tr key={i}>
+            {!loading && logs.map((log) => (
+              <tr key={log.id}>
                 <td className={styles.time}>{new Date(log.created_at).toLocaleString()}</td>
                 <td className={styles.email}>{log.sender}</td>
                 <td className={styles.email}>{log.recipient}</td>
-                <td className={styles.subject}>{log.subject || <span className={styles.dim}>—</span>}</td>
                 <td>
                   <span className={log.outcome === 'blocked' ? styles.blocked : styles.allowed}>
                     {log.outcome === 'blocked' ? '🚫 blocked' : '✓ delivered'}

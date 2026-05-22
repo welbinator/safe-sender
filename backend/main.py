@@ -152,6 +152,30 @@ app.include_router(admin.router)
 
 @app.get("/health")
 async def health() -> dict:
+    """Liveness + DB readiness probe (F-47).
+
+    A 200 here means the process is up AND can round-trip a query to Postgres.
+    A pure liveness check (always-200) misled the loadbalancer during DB
+    outages — requests landed on backends that immediately 500'd. Now if PG
+    is unreachable we return 503 and the proxy can route around us.
+    """
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+    except Exception as exc:
+        logger.warning("health: DB ping failed: %s", exc)
+        raise HTTPException(status_code=503, detail="db_unavailable")
+    return {"status": "ok", "db": "ok"}
+
+
+@app.get("/healthz")
+async def healthz() -> dict:
+    """Pure liveness probe — no DB, never blocks on outages.
+
+    Use this for k8s/docker liveness restarts (process is alive). Use /health
+    for readiness (process can serve traffic).
+    """
     return {"status": "ok"}
 
 

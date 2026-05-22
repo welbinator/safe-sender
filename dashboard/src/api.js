@@ -37,10 +37,13 @@ api.interceptors.response.use(
   r => r,
   err => {
     if (err.response?.status === 401) {
-      // Cookie is expired/invalid. Send the user back to the login page.
-      // Don't redirect during the initial /me probe — AuthContext handles that.
+      // F-41: don't bash the URL bar from inside the HTTP layer — that
+      // throws away React state, causes a full reload, and races with the
+      // initial /me probe. Emit an event; AuthContext listens, clears its
+      // own state, and navigates via the router (or shows a re-login modal
+      // later). Suppress for /me which AuthContext owns directly.
       if (!err.config?.url?.endsWith('/customers/me')) {
-        window.location.href = '/login';
+        window.dispatchEvent(new CustomEvent('auth:unauthorized'));
       }
     }
     return Promise.reject(err);

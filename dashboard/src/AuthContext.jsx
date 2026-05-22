@@ -18,6 +18,17 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
+  // F-41: when the API layer sees a 401 on any non-/me request, it dispatches
+  // 'auth:unauthorized'. We react by clearing customer state — the RequireAuth
+  // guard in App.jsx then redirects via <Navigate>, preserving router state
+  // and avoiding the hard `window.location.href` reload from inside an HTTP
+  // interceptor.
+  useEffect(() => {
+    const onUnauthorized = () => setCustomer(null);
+    window.addEventListener('auth:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('auth:unauthorized', onUnauthorized);
+  }, []);
+
   // login() is called by the Google callback AFTER the server set the cookie.
   const login = (customerData) => {
     setCustomer(customerData);

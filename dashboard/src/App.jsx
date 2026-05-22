@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './AuthContext';
 import Login from './pages/Login';
 import Layout from './pages/Layout';
 import widgetRegistry from './widgetRegistry';
+import ErrorBoundary from './ErrorBoundary';
 
 function RequireAuth({ children }) {
   const { customer, loading } = useAuth();
@@ -24,7 +25,10 @@ export default function App() {
                 key={w.id}
                 path={w.route === '/' ? undefined : w.route.slice(1)}
                 index={w.route === '/'}
-                element={<w.Component />}
+                // F-42: a render-time crash in one widget no longer blanks
+                // the whole dashboard — ErrorBoundary catches it and shows
+                // a recoverable error card in the widget's slot.
+                element={<ErrorBoundary><w.Component /></ErrorBoundary>}
               />
             ))}
           </Route>

@@ -20,11 +20,17 @@ export default function Stats() {
         const blocked = logs.filter(l => l.outcome === 'blocked').length;
         const allowed = logs.filter(l => l.outcome === 'allowed').length;
 
-        // Top triggered rules
+        // Top triggered rules — derive from the joined rule metadata returned
+        // by /logs (matched_rule_name / matched_rule_pattern). The old code
+        // read `l.matched_rule` which doesn't exist, so this card was
+        // permanently empty (F-40).
         const ruleCounts = {};
-        logs.filter(l => l.matched_rule).forEach(l => {
-          ruleCounts[l.matched_rule] = (ruleCounts[l.matched_rule] || 0) + 1;
-        });
+        logs
+          .filter(l => l.matched_rule_id)
+          .forEach(l => {
+            const label = l.matched_rule_name || l.matched_rule_pattern || '(deleted rule)';
+            ruleCounts[label] = (ruleCounts[label] || 0) + 1;
+          });
         const topRules = Object.entries(ruleCounts)
           .sort((a, b) => b[1] - a[1])
           .slice(0, 5);
