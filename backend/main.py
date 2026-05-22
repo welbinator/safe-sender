@@ -23,7 +23,9 @@ Internal (SMTP service only, not exposed via nginx):
   GET  /internal/rules/{domain}
   POST /internal/scan-log
 """
+import asyncio
 import hashlib
+import logging
 import os
 from typing import Optional
 from urllib.parse import urlparse
@@ -47,7 +49,9 @@ if _db_password in _WEAK_DB_PASSWORDS:
         "DATABASE_URL contains a weak/default password "
         f"({_db_password!r}). Set a strong password before starting."
     )
-print(f"[main] DATABASE_URL host portion: ...@{DATABASE_URL.split('@')[-1]}", flush=True)
+logger = logging.getLogger("sender_safety.backend")
+
+logger.info("DATABASE_URL host portion: ...@%s", DATABASE_URL.split("@")[-1])
 
 # ---------------------------------------------------------------------------
 # Sprint C1 HOTFIX (audit C-1): Refuse to start if test-token bypass is
@@ -119,7 +123,7 @@ async def startup():
         except Exception as e:
             last_err = e
             wait = min(2 ** attempt, 30)
-            print(f"DB connect attempt {attempt + 1} failed: {e}. Retrying in {wait}s...")
+            logger.warning("DB connect attempt %d failed: %s. Retrying in %ds...", attempt + 1, e, wait)
             await asyncio.sleep(wait)
     raise RuntimeError(f"Could not connect to database after 10 attempts: {last_err}")
 
@@ -327,7 +331,13 @@ async def smtp_auth(body: SmtpAuthRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     import bcrypt as _bcrypt
-    valid = _bcrypt.checkpw(password.encode(), row["smtp_password_hash"].encode())
+    # Sprint C2 (audit F-02): bcrypt.checkpw is CPU-bound (~250-500ms).
+    # This endpoint sits on the SMTP auth hot path — every inbound message
+    # hits it. Offload to a worker thread so we don't stall the FastAPI
+    # event loop under concurrent SMTP authentication.
+    valid = await asyncio.to_thread(
+        _bcrypt.checkpw, password.encode(), row["smtp_password_hash"].encode()
+    )
     if not valid:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 

@@ -4,8 +4,8 @@ FastAPI dependencies for auth + DB.
 Auth (Sprint B C13): the preferred transport is the HttpOnly `session` cookie
 set by POST /auth/google. We also accept `Authorization: Bearer <jwt>` as a
 fallback so non-browser API clients and the transition window keep working —
-this is gated by ALLOW_BEARER_AUTH (default "1"). Flip to "0" after the
-frontend has fully moved to cookies.
+this is gated by ALLOW_BEARER_AUTH (default "0" as of Sprint C2 F-10 — flip
+to "1" explicitly if a non-browser client still needs it).
 
 CSRF (Sprint C3 F-11): cookie-authenticated mutating requests must pass the
 double-submit-cookie check: the `csrf_token` cookie (non-HttpOnly, set at login)
@@ -85,7 +85,7 @@ def _extract_token(request: Request, session_cookie: Optional[str]) -> str:
                     ),
                 )
         return session_cookie
-    if os.environ.get("ALLOW_BEARER_AUTH", "1") == "1":
+    if os.environ.get("ALLOW_BEARER_AUTH", "0") == "1":
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             return auth.split(" ", 1)[1].strip()

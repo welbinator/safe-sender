@@ -12,6 +12,7 @@ Does NOT own:
 """
 from __future__ import annotations
 
+import asyncio
 import secrets
 from dataclasses import dataclass
 from typing import Optional
@@ -45,7 +46,11 @@ class AuthService:
     @staticmethod
     def _generate_smtp_credentials() -> tuple[str, str, str]:
         """Return (smtp_username, raw_password, password_hash). One-shot — the
-        plaintext is discarded after this method returns."""
+        plaintext is discarded after this method returns.
+
+        bcrypt.hashpw is CPU-bound (~250-500ms at default rounds). Callers
+        inside async request handlers MUST invoke this via asyncio.to_thread
+        to avoid stalling the event loop (audit F-02)."""
         smtp_username = "ss_" + secrets.token_hex(8)
         raw_password = secrets.token_urlsafe(16)
         password_hash = bcrypt.hashpw(raw_password.encode(), bcrypt.gensalt()).decode()
@@ -79,7 +84,9 @@ class AuthService:
                 "Contact support if you believe this is an error."
             )
 
-        smtp_username, _raw, smtp_password_hash = self._generate_smtp_credentials()
+        smtp_username, _raw, smtp_password_hash = await asyncio.to_thread(
+            self._generate_smtp_credentials
+        )
         row = await self.customers.create(
             domain=domain,
             name=company_name,

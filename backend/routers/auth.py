@@ -15,7 +15,10 @@ import asyncio
 import os
 from typing import Optional
 
+import logging
+
 import boto3
+from botocore.config import Config as BotoConfig
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
@@ -24,9 +27,32 @@ from deps import get_auth_service, issue_csrf_token
 from services import AuthService, ConflictError, ServiceError
 from services.email_templates import render_welcome_email
 
+logger = logging.getLogger(__name__)
+
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SES_SOURCE_ARN = os.environ.get("SES_SOURCE_ARN", "")
 FROM_EMAIL = os.environ.get("FROM_EMAIL", "noreply@sendersafety.com")
+
+# Sprint C2 (audit F-05, F-07):
+# boto3 clients are expensive to construct (~100ms credential discovery +
+# endpoint resolution). Cache one at module scope and pin connect/read
+# timeouts so a stalled SES API call can't pin a worker thread forever.
+_SES_BOTO_CONFIG = BotoConfig(
+    connect_timeout=5,
+    read_timeout=10,
+    retries={"max_attempts": 2, "mode": "standard"},
+)
+_ses_client = None
+
+
+def _get_ses_client():
+    global _ses_client
+    if _ses_client is None:
+        _ses_client = boto3.client(
+            "ses", region_name=AWS_REGION, config=_SES_BOTO_CONFIG
+        )
+    return _ses_client
+
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -39,7 +65,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 def _send_welcome_email_sync(to_email: str, name: str, domain: str) -> None:
     subject, body_text, body_html = render_welcome_email(name=name, domain=domain)
     try:
-        ses = boto3.client("ses", region_name=AWS_REGION)
+        ses = _get_ses_client()
         kwargs: dict = dict(
             Source=FROM_EMAIL,
             Destination={"ToAddresses": [to_email]},
@@ -56,7 +82,10 @@ def _send_welcome_email_sync(to_email: str, name: str, domain: str) -> None:
         ses.send_email(**kwargs)
     except Exception as exc:
         # H13 + general welcome-email failures are non-fatal.
-        print(f"[auth] Welcome email failed (non-fatal): {exc}", flush=True)
+        logger.warning(
+            "welcome_email_failed",
+            extra={"to_email": to_email, "error": str(exc)},
+        )
 
 
 async def _send_welcome_email_bg(to_email: str, name: str, domain: str) -> None:

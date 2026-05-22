@@ -27,6 +27,7 @@ import os
 import re as _stdlib_re  # kept ONLY for non-customer code paths
 import ssl
 import sys
+import threading
 import time
 import unicodedata
 from email import policy as email_policy
@@ -36,6 +37,7 @@ import boto3
 import requests
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
+from botocore.config import Config as BotoConfig
 
 # google-re2 — RE2 has linear-time guarantees and is immune to ReDoS.
 # Used for all customer-supplied regex patterns. Stdlib re is unsafe here
@@ -248,10 +250,54 @@ _alert_cooldowns: dict[str, float] = {}
 ALERT_COOLDOWN = 3600  # seconds between repeat alerts for the same key
 
 
+# ---------------------------------------------------------------------------
+# Cached SES client (Sprint C2 — audit F-05 / F-07)
+#
+# Previously every alert + every outbound email constructed a fresh
+# boto3.client("ses"), which (a) does TLS handshakes and STS lookups on the
+# hot path and (b) had no socket/connect timeouts — a slow SES endpoint
+# could pin a thread for the default 60s and stall the SMTP server.
+#
+# We now build one client per process, with bounded timeouts and standard
+# retries. boto3 clients are documented as thread-safe for read-only ops
+# like send_email/send_raw_email, so sharing across worker threads is OK.
+# ---------------------------------------------------------------------------
+
+_ses_client = None
+_ses_client_lock = threading.Lock()
+
+
+def _get_ses_client():
+    """Return the process-wide cached boto3 SES client, building it on first use."""
+    global _ses_client
+    if _ses_client is not None:
+        return _ses_client
+    with _ses_client_lock:
+        if _ses_client is None:
+            _ses_client = boto3.client(
+                "ses",
+                region_name=AWS_REGION,
+                aws_access_key_id=AWS_ACCESS_KEY_ID or None,
+                aws_secret_access_key=AWS_SECRET_ACCESS_KEY or None,
+                config=BotoConfig(
+                    connect_timeout=5,
+                    read_timeout=10,
+                    retries={"max_attempts": 3, "mode": "standard"},
+                ),
+            )
+    return _ses_client
+
+
 def _send_admin_alert(subject: str, body: str, key: str = "default") -> None:
     """
     Send an SES email to the admin. Silently swallows errors.
     Rate-limited per `key` to avoid flooding.
+
+    Sprint C2 (audit F-04 / F-05): the SES client is now cached at module
+    scope (`_get_ses_client()`) with bounded connect/read timeouts so a
+    stalled SES API call can't pin a thread forever. Call sites inside
+    async handlers should use `_send_admin_alert_async` (below) to keep
+    the network call off the SMTP event loop.
     """
     now = time.time()
     if now - _alert_cooldowns.get(key, 0) < ALERT_COOLDOWN:
@@ -263,12 +309,7 @@ def _send_admin_alert(subject: str, body: str, key: str = "default") -> None:
         return
 
     try:
-        client = boto3.client(
-            "ses",
-            region_name=AWS_REGION,
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        )
+        client = _get_ses_client()
         client.send_email(
             Source=SES_FROM_EMAIL,
             Destination={"ToAddresses": [ADMIN_EMAIL]},
@@ -280,6 +321,17 @@ def _send_admin_alert(subject: str, body: str, key: str = "default") -> None:
         logger.info("Admin alert sent", extra={"alert_subject": subject, "to": ADMIN_EMAIL})
     except Exception as exc:
         logger.error("Failed to send admin alert", extra={"error": str(exc)})
+
+
+async def _send_admin_alert_async(subject: str, body: str, key: str = "default") -> None:
+    """Async wrapper — offload SES alert to a worker thread so the SMTP
+    event loop doesn't stall on boto3's blocking HTTP call. Use from any
+    async handler; falls through to a no-op fast path when the cooldown
+    is active (cheap, runs inline)."""
+    now = time.time()
+    if now - _alert_cooldowns.get(key, 0) < ALERT_COOLDOWN:
+        return
+    await asyncio.to_thread(_send_admin_alert, subject, body, key)
 
 
 # ---------------------------------------------------------------------------
@@ -429,13 +481,11 @@ def _forward_via_ses(
     Sprint B C16: we tag every send with the originating customer_id so SES
     bounce/complaint notifications carry it back to the webhook handler, which
     scopes suppression entries to that customer.
+
+    Sprint C2 (audit F-05 / F-07): now uses the cached, timeout-bounded SES
+    client from `_get_ses_client()`; no per-call boto3 client construction.
     """
-    client = boto3.client(
-        "ses",
-        region_name=AWS_REGION,
-        aws_access_key_id=AWS_ACCESS_KEY_ID or None,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY or None,
-    )
+    client = _get_ses_client()
     kwargs = {
         "Source": mail_from,
         "Destinations": rcpt_tos,
@@ -593,7 +643,7 @@ class SafeSenderHandler:
             data = await _fetch_rules(domain)
         except Exception as exc:
             logger.error("Error fetching rules", extra={"domain": domain, "error": str(exc)})
-            _send_admin_alert(
+            await _send_admin_alert_async(
                 subject="Backend unreachable",
                 body=f"SMTP server could not reach backend for domain {domain}.\nError: {exc}",
                 key="backend-unreachable",
@@ -615,7 +665,7 @@ class SafeSenderHandler:
                 "Rate limit exceeded",
                 extra={"customer_id": customer_id, "domain": domain, "count": count},
             )
-            _send_admin_alert(
+            await _send_admin_alert_async(
                 subject=f"Rate limit hit: {domain}",
                 body=(
                     f"Customer domain '{domain}' (id={customer_id}) has exceeded the rate limit "
@@ -698,7 +748,7 @@ class SafeSenderHandler:
             logger.info("Email forwarded via SES", extra={"from": mail_from})
         except Exception as exc:
             logger.error("SES send failed", extra={"error": str(exc), "from": mail_from})
-            _send_admin_alert(
+            await _send_admin_alert_async(
                 subject="SES delivery failure",
                 body=f"SES failed to deliver email from '{mail_from}'.\nError: {exc}",
                 key="ses-failure",

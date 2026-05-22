@@ -174,6 +174,10 @@ def _seed_env(_pg_server):
     os.environ["ADMIN_API_KEY"] = _STRONG_ADMIN
     os.environ["ADMIN_SECRET"] = _STRONG_ADMIN  # Sprint C1 admin panel auth
     os.environ["ALLOW_TEST_TOKENS"] = "1"
+    # Sprint C2 (audit F-10): production default is now "0". The test suite
+    # still uses Bearer-auth helpers extensively, so re-enable for tests.
+    # The one test that asserts off-by-default monkeypatches it back to "0".
+    os.environ["ALLOW_BEARER_AUTH"] = "1"
     # Ensure cookie can be set over http TestClient (no TLS).
     os.environ["COOKIE_INSECURE"] = "1"
     # Stop welcome-email background tasks from doing anything externally —

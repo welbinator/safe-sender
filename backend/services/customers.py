@@ -183,13 +183,15 @@ class CustomerService:
     ) -> dict[str, Any]:
         """Generate a fresh password, persist its bcrypt hash, return plaintext once.
 
-        bcrypt.hashpw is CPU-bound. ~250-500ms on the gensalt default rounds —
-        we let it run on the event loop for now (single-tenant request) but
-        this is a candidate for asyncio.to_thread if the endpoint sees scale.
+        bcrypt.hashpw is CPU-bound (~250-500ms at default rounds). We offload
+        to a worker thread via asyncio.to_thread so concurrent rotations don't
+        stall the event loop (audit F-02).
         """
         new_password = secrets.token_urlsafe(16)
-        new_hash = bcrypt.hashpw(
-            new_password.encode(), bcrypt.gensalt()
+        new_hash = (
+            await asyncio.to_thread(
+                bcrypt.hashpw, new_password.encode(), bcrypt.gensalt()
+            )
         ).decode()
 
         row = await self.customers.update_smtp_password_hash(
