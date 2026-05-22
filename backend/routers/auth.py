@@ -22,7 +22,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from security import create_jwt, verify_google_id_token
-from deps import get_auth_service, issue_csrf_token
+from deps import get_auth_service, issue_csrf_token, rate_limit_auth_ip
 from services import AuthService, ConflictError, ServiceError
 from services.email_dispatch import send_welcome_email
 
@@ -59,7 +59,7 @@ class AuthResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@router.post("/google", response_model=AuthResponse)
+@router.post("/google", response_model=AuthResponse, dependencies=[Depends(rate_limit_auth_ip)])
 async def auth_google(
     body: GoogleAuthRequest,
     background_tasks: BackgroundTasks,

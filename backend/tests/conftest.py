@@ -189,6 +189,10 @@ def _seed_env(_pg_server):
     os.environ.setdefault("AWS_REGION", "us-east-1")
     # Tests don't enforce Google Workspace `hd`.
     os.environ.setdefault("WORKSPACE_ONLY", "0")
+    # F-49 — rate limiter is fail-open and Redis is not present in pytest.
+    # Disable by default so existing tests aren't perturbed; the dedicated
+    # rate-limit test module re-enables and monkeypatches a fake client.
+    os.environ["RATE_LIMIT_ENABLED"] = "0"
     yield
 
 

@@ -217,6 +217,13 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await close_pool()
+    # F-49 — close the rate-limit Redis client cleanly so we don't leak the
+    # connection on container restart.
+    try:
+        from security import close_redis as _close_redis
+        await _close_redis()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

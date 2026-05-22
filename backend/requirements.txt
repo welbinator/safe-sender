@@ -23,3 +23,6 @@ psycopg2-binary==2.9.10
 # starlette<1.0.0 and starlette 0.52.x has PYSEC-2026-161 (fix in 1.0.1).
 # Direct exposition is ~30 lines and matches what the instrumentator wraps.
 prometheus-client==0.21.0
+# F-49 — per-customer rate limiting backed by Redis token-bucket.
+# Async client; redis-py 5.x rolls hiredis + asyncio support into the main pkg.
+redis==5.2.1

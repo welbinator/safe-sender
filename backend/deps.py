@@ -185,6 +185,76 @@ async def get_admin_audit_repo(conn=Depends(get_conn)):
 
 
 # ---------------------------------------------------------------------------
+# Rate-limit dependencies (F-49).
+#
+# Two flavors:
+#   - rate_limit_read / rate_limit_write apply per authenticated customer
+#     (subject = customer UUID). Use on customer-facing CRUD.
+#   - rate_limit_auth_ip applies per source IP. Use on login endpoints,
+#     where there's no authenticated subject yet.
+#
+# All are FastAPI deps that 429 on breach with a Retry-After header. Fail-open
+# when Redis is unreachable — the rate_limit module handles that.
+# ---------------------------------------------------------------------------
+
+from security import (
+    check_auth_by_ip,
+    check_customer_read,
+    check_customer_write,
+)
+
+
+def _retry_after_headers(retry_after_s: float) -> dict[str, str]:
+    # RFC 7231: Retry-After can be HTTP-date or seconds. Use integer seconds,
+    # min 1 (a 0 doesn't tell the client to wait at all).
+    return {"Retry-After": str(max(1, int(retry_after_s + 0.999)))}
+
+
+async def rate_limit_read(
+    customer: dict[str, Any] = Depends(get_current_customer),
+) -> None:
+    result = await check_customer_read(str(customer["id"]))
+    if not result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded for read operations. Slow down.",
+            headers=_retry_after_headers(result.retry_after_seconds),
+        )
+
+
+async def rate_limit_write(
+    customer: dict[str, Any] = Depends(get_current_customer),
+) -> None:
+    result = await check_customer_write(str(customer["id"]))
+    if not result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded for write operations. Slow down.",
+            headers=_retry_after_headers(result.retry_after_seconds),
+        )
+
+
+def _client_ip(request: Request) -> str:
+    # nginx sets X-Forwarded-For; trust the first hop (we run behind our own
+    # nginx, no third-party proxy). Fall back to request.client.
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def rate_limit_auth_ip(request: Request) -> None:
+    ip = _client_ip(request)
+    result = await check_auth_by_ip(ip)
+    if not result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many auth attempts from this IP. Slow down.",
+            headers=_retry_after_headers(result.retry_after_seconds),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Service factory dependencies — share the request connection (F-12).
 # ---------------------------------------------------------------------------
 
