@@ -331,3 +331,53 @@ class TestCsrfProtection:
             headers=auth_headers(fake_customer["token"]),
         )
         assert resp.status_code in (200, 201), resp.text
+
+
+class TestAdminPanel:
+    """Sprint C1 hotfix (audit C-4): admin panel hardening."""
+
+    def _admin_headers(self):
+        import os
+        return {"Authorization": f"Bearer {os.environ['ADMIN_SECRET']}"}
+
+    def test_admin_requires_auth(self, client):
+        client.cookies.clear()
+        resp = client.get("/admin/stats")
+        assert resp.status_code == 401
+
+    def test_admin_with_valid_secret_succeeds(self, client):
+        client.cookies.clear()
+        resp = client.get("/admin/stats", headers=self._admin_headers())
+        assert resp.status_code == 200, resp.text
+        assert "total_customers" in resp.json()
+
+    def test_admin_audit_log_records_actions(self, client):
+        client.cookies.clear()
+        client.get("/admin/stats", headers=self._admin_headers())
+        client.get("/admin/stats", headers={"Authorization": "Bearer wrong"})
+        resp = client.get("/admin/audit?limit=50", headers=self._admin_headers())
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert any(r["status_code"] == 200 and r["path"] == "/admin/stats" for r in rows)
+        assert any(r["status_code"] == 401 for r in rows)
+
+    def test_admin_ip_allowlist_blocks_when_set(self, client, monkeypatch):
+        from routers import admin as admin_mod
+        import ipaddress
+        monkeypatch.setattr(admin_mod, "_ADMIN_ALLOWLIST",
+                            [ipaddress.ip_network("10.99.99.0/24")])
+        client.cookies.clear()
+        resp = client.get("/admin/stats", headers=self._admin_headers())
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "IP not allowed"
+
+    def test_admin_rate_limit(self, client, monkeypatch):
+        from routers import admin as admin_mod
+        with admin_mod._rate_lock:
+            admin_mod._rate_buckets.clear()
+        monkeypatch.setattr(admin_mod, "_RATE_LIMIT_PER_MIN", 3)
+        client.cookies.clear()
+        h = self._admin_headers()
+        codes = [client.get("/admin/stats", headers=h).status_code for _ in range(4)]
+        assert codes[:3] == [200, 200, 200]
+        assert codes[3] == 429

@@ -172,6 +172,7 @@ def _seed_env(_pg_server):
     os.environ["JWT_SECRET"] = _STRONG_JWT
     os.environ["INTERNAL_SHARED_SECRET"] = _STRONG_INTERNAL
     os.environ["ADMIN_API_KEY"] = _STRONG_ADMIN
+    os.environ["ADMIN_SECRET"] = _STRONG_ADMIN  # Sprint C1 admin panel auth
     os.environ["ALLOW_TEST_TOKENS"] = "1"
     # Ensure cookie can be set over http TestClient (no TLS).
     os.environ["COOKIE_INSECURE"] = "1"
