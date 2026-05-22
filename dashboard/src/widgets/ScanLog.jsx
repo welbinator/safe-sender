@@ -1,5 +1,8 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { getLogs } from '../api';
+import { extractErrorMessage } from '../errors';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { SkeletonRows } from '../components/Skeleton';
 import styles from './ScanLog.module.css';
 
 const PAGE_SIZE = 25;
@@ -9,11 +12,27 @@ export default function ScanLog() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [filters, setFilters] = useState({ outcome: '', sender: '', date_from: '', date_to: '' });
+  // F-61: keep the keystroke value local; debounce into the filter that
+  // triggers the network call. Heavy table no longer re-renders per char.
+  const [senderInput, setSenderInput] = useState('');
+  const debouncedSender = useDebouncedValue(senderInput, 300);
+  const firstSenderSync = useRef(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // Push the debounced sender into the real filter (and reset paging).
+  useEffect(() => {
+    if (firstSenderSync.current) {
+      firstSenderSync.current = false;
+      return;
+    }
+    setFilters((f) => ({ ...f, sender: debouncedSender }));
+    setPage(0);
+  }, [debouncedSender]);
+
   const load = useCallback(() => {
     setLoading(true);
+    setError('');
     const params = { page: page + 1, page_size: PAGE_SIZE };
     if (filters.outcome) params.outcome = filters.outcome;
     if (filters.sender) params.sender = filters.sender;
@@ -25,7 +44,7 @@ export default function ScanLog() {
         setLogs(r.data.results || []);
         setTotal(r.data.total || 0);
       })
-      .catch(() => setError('Failed to load logs'))
+      .catch((err) => setError(extractErrorMessage(err, 'Failed to load logs')))
       .finally(() => setLoading(false));
   }, [page, filters]);
 
@@ -59,8 +78,9 @@ export default function ScanLog() {
         </select>
         <input
           placeholder="Sender email"
-          value={filters.sender}
-          onChange={e => setFilters(f => ({ ...f, sender: e.target.value }))}
+          aria-label="Filter by sender email"
+          value={senderInput}
+          onChange={e => setSenderInput(e.target.value)}
         />
         <input
           type="date"
@@ -75,7 +95,7 @@ export default function ScanLog() {
         <button type="submit">Filter</button>
       </form>
 
-      {error && <div className={styles.error}>{error}</div>}
+      {error && <div className={styles.error} role="alert">{error}</div>}
 
       <div className={styles.tableWrap}>
         <table className={styles.table}>
@@ -89,9 +109,7 @@ export default function ScanLog() {
             </tr>
           </thead>
           <tbody>
-            {loading && (
-              <tr><td colSpan={5} className={styles.loading}>Loading…</td></tr>
-            )}
+            {loading && <SkeletonRows rows={6} cols={5} />}
             {!loading && logs.length === 0 && (
               <tr><td colSpan={5} className={styles.empty}>No logs found.</td></tr>
             )}

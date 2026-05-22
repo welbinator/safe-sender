@@ -106,3 +106,35 @@ jobs:
         # then drop continue-on-error.
         continue-on-error: true
         run: pytest tests/ --tb=short
+
+  test-frontend:
+    name: Test Frontend
+    # Sprint C6 F-63: vitest + RTL coverage for shared helpers + hooks.
+    # Sprint C6 F-58: `npm audit` runs as a soft gate (warn-only) so a new
+    # advisory doesn't break unrelated PRs, but it surfaces in the run log.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Unit tests (vitest)
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: npm audit (high+)
+        # F-58: don't block on transitive moderate noise, but fail the job
+        # if a *high* or *critical* advisory lands on a production dep.
+        # Audit prod-only — devDeps (vitest, jsdom, eslint plugins) live in
+        # CI containers, not the shipped bundle.
+        run: npm audit --omit=dev --audit-level=high
+      # TODO(sprint-c6+): `npm run lint` currently has ~44 pre-existing
+      # errors (prop-types, no-unused-vars). Add as a CI gate once the
+      # widget cleanup pass lands.

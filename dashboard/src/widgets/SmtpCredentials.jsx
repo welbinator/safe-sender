@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { getSmtpCredentials, rotateSmtpCredentials } from '../api';
+import { extractErrorMessage } from '../errors';
 
 export default function SmtpCredentials() {
   const [creds, setCreds] = useState(null);
@@ -12,7 +13,7 @@ export default function SmtpCredentials() {
   useEffect(() => {
     getSmtpCredentials()
       .then(r => setCreds(r.data))
-      .catch(() => setError('Could not load SMTP credentials.'))
+      .catch((err) => setError(extractErrorMessage(err, 'Could not load SMTP credentials.')))
       .finally(() => setLoading(false));
   }, []);
 
@@ -25,8 +26,8 @@ export default function SmtpCredentials() {
       const r = await rotateSmtpCredentials();
       setCreds({ smtp_host: r.data.smtp_host, smtp_port: r.data.smtp_port, smtp_username: r.data.smtp_username });
       setNewPassword(r.data.smtp_password);
-    } catch {
-      setError('Failed to rotate credentials.');
+    } catch (err) {
+      setError(extractErrorMessage(err, 'Failed to rotate credentials.'));
     } finally {
       setRotating(false);
     }
