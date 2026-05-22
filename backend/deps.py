@@ -55,6 +55,15 @@ def issue_csrf_token() -> str:
 # directly because FastAPI accepts sync callables that return the resource.
 
 
+async def get_conn(pool: asyncpg.Pool = Depends(get_pool)):
+    """Acquire a single connection from the pool for the request lifetime.
+
+    See F-12 comment block below for rationale.
+    """
+    async with pool.acquire() as conn:
+        yield conn
+
+
 def _extract_token(request: Request, session_cookie: Optional[str]) -> str:
     """Cookie first, then Authorization header (when allowed). 401 otherwise.
 
@@ -95,7 +104,7 @@ def _extract_token(request: Request, session_cookie: Optional[str]) -> str:
 async def get_current_customer(
     request: Request,
     session: Optional[str] = Cookie(default=None),
-    pool: asyncpg.Pool = Depends(get_pool),
+    conn=Depends(get_conn),
 ) -> dict[str, Any]:
     """Validate session and return the customer row.
 
@@ -111,8 +120,7 @@ async def get_current_customer(
             detail="Invalid token payload",
         )
 
-    async with pool.acquire() as conn:
-        row = await CustomerRepository(conn).get_active_by_id(customer_id)
+    row = await CustomerRepository(conn).get_active_by_id(customer_id)
     if not row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -122,112 +130,83 @@ async def get_current_customer(
 
 
 # ---------------------------------------------------------------------------
-# Repository factory dependencies
+# Request-scoped connection (Sprint C3 F-12).
 #
-# Each factory acquires a connection from the pool for the lifetime of the
-# request via FastAPI's generator-based dependency contract. Routers receive a
-# fully-constructed repo and never touch raw SQL or the pool themselves.
-# ---------------------------------------------------------------------------
-
-async def get_customer_repo(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
-    async with pool.acquire() as conn:
-        yield CustomerRepository(conn)
-
-
-async def get_rule_repo(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
-    async with pool.acquire() as conn:
-        yield RuleRepository(conn)
-
-
-async def get_scan_log_repo(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
-    async with pool.acquire() as conn:
-        yield ScanLogRepository(conn)
-
-
-async def get_suppression_repo(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
-    async with pool.acquire() as conn:
-        yield SuppressionRepository(conn)
-
-
-async def get_admin_audit_repo(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
-    async with pool.acquire() as conn:
-        yield AdminAuditRepository(conn)
-
-
-# ---------------------------------------------------------------------------
-# Service factory dependencies
+# Before: every repo/service dep called pool.acquire() independently, so a
+# single request that touched N services pulled N connections out of the pool.
+# With max_size=10 you'd exhaust the pool at ~3 concurrent requests.
 #
-# Services compose 1+ repository over a single request-scoped connection. We
-# acquire once per dependency so the repos inside share that connection — this
-# is what lets services run multi-step operations transactionally if they need
-# to (today they don't, but the seam is here when we want it).
+# Now: get_conn yields ONE connection for the whole request. FastAPI caches
+# dependency results per-request, so every Depends(get_conn) downstream
+# resolves to the same connection object. Repo and service factories no longer
+# touch the pool directly — they take the cached conn.
+#
+# Side benefit: services that compose multiple repos now share a connection
+# automatically, so multi-step operations on the same request are trivially
+# transactionable (`async with conn.transaction(): ...`).
 # ---------------------------------------------------------------------------
 
-async def get_customer_service(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
-    """CustomerService with scan-log access wired in.
+# ---------------------------------------------------------------------------
+# Repository factory dependencies — one connection per request (F-12).
+# ---------------------------------------------------------------------------
 
-    A single repo+service stack would be enough for profile/SMTP creds, but
-    test-connection needs scan_logs too. One acquire, both repos, one service.
-    """
+async def get_customer_repo(conn=Depends(get_conn)):
+    return CustomerRepository(conn)
+
+
+async def get_rule_repo(conn=Depends(get_conn)):
+    return RuleRepository(conn)
+
+
+async def get_scan_log_repo(conn=Depends(get_conn)):
+    return ScanLogRepository(conn)
+
+
+async def get_suppression_repo(conn=Depends(get_conn)):
+    return SuppressionRepository(conn)
+
+
+async def get_admin_audit_repo(conn=Depends(get_conn)):
+    return AdminAuditRepository(conn)
+
+
+# ---------------------------------------------------------------------------
+# Service factory dependencies — share the request connection (F-12).
+# ---------------------------------------------------------------------------
+
+async def get_customer_service(conn=Depends(get_conn)):
+    """CustomerService with scan-log access wired in over the shared conn."""
     from services import CustomerService
-    async with pool.acquire() as conn:
-        yield CustomerService(
-            customers=CustomerRepository(conn),
-            scan_logs=ScanLogRepository(conn),
-        )
+    return CustomerService(
+        customers=CustomerRepository(conn),
+        scan_logs=ScanLogRepository(conn),
+    )
 
 
-async def get_rule_service(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
+async def get_rule_service(conn=Depends(get_conn)):
     from services import RuleService
-    async with pool.acquire() as conn:
-        yield RuleService(RuleRepository(conn))
+    return RuleService(RuleRepository(conn))
 
 
-async def get_auth_service(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
+async def get_auth_service(conn=Depends(get_conn)):
     """AuthService wraps CustomerRepository — Google login upsert path."""
     from services import AuthService
-    async with pool.acquire() as conn:
-        yield AuthService(CustomerRepository(conn))
+    return AuthService(CustomerRepository(conn))
 
 
-async def get_log_service(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
+async def get_log_service(conn=Depends(get_conn)):
     from services import LogService
-    async with pool.acquire() as conn:
-        yield LogService(ScanLogRepository(conn))
+    return LogService(ScanLogRepository(conn))
 
 
-async def get_admin_service(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
+async def get_admin_service(conn=Depends(get_conn)):
     from services import AdminService
-    async with pool.acquire() as conn:
-        yield AdminService(
-            admin_audit=AdminAuditRepository(conn),
-            suppressions=SuppressionRepository(conn),
-        )
+    return AdminService(
+        admin_audit=AdminAuditRepository(conn),
+        suppressions=SuppressionRepository(conn),
+    )
 
 
-async def get_webhook_service(
-    pool: asyncpg.Pool = Depends(get_pool),
-):
+async def get_webhook_service(conn=Depends(get_conn)):
     from services import SesWebhookService
-    async with pool.acquire() as conn:
-        yield SesWebhookService(SuppressionRepository(conn))
+    return SesWebhookService(SuppressionRepository(conn))
