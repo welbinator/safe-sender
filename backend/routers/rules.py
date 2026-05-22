@@ -1,38 +1,24 @@
 """
 Rules CRUD endpoints.
 
-GET    /rules           — list all rules for the authenticated customer
+GET    /rules           — list all active rules for the authenticated customer
 POST   /rules           — create a new rule
 PUT    /rules/{rule_id} — update an existing rule
 DELETE /rules/{rule_id} — deactivate (soft-delete) a rule
+
+This router is thin by design: it parses request bodies, hands them to
+RuleService, and translates service errors to HTTPException.
 """
 from typing import Any, List, Optional
 
-import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-# google-re2 — RE2 has linear-time guarantees and is immune to ReDoS.
-# Falls back to the stdlib `re` module if google-re2 isn't installed so dev
-# checkouts don't break, but a startup warning makes it loud.
-try:
-    import re2 as _regex_engine  # type: ignore
-    _USING_RE2 = True
-except ImportError:  # pragma: no cover - dev fallback
-    import re as _regex_engine  # type: ignore
-    _USING_RE2 = False
-    import logging
-    logging.getLogger(__name__).warning(
-        "google-re2 not installed — falling back to stdlib `re`. "
-        "Customer regexes will NOT be ReDoS-safe. Install google-re2 in prod."
-    )
-
-from deps import get_current_customer, get_pool
+from deps import get_current_customer, get_rule_service
+from services import InvalidRegexPattern, NotFoundError, RuleService
+from services.rules import VALID_MATCH_TYPES, VALID_SCOPES
 
 router = APIRouter(prefix="/rules", tags=["rules"])
-
-VALID_MATCH_TYPES = {"string", "regex"}
-VALID_SCOPES = {"external", "internal", "both"}
 
 # Customer-controlled regex patterns are capped to keep the engine fast and
 # the storage column bounded.
@@ -116,7 +102,7 @@ class RuleResponse(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _row_to_rule(row) -> RuleResponse:
+def _row_to_rule(row: dict[str, Any]) -> RuleResponse:
     return RuleResponse(
         id=str(row["id"]),
         customer_id=str(row["customer_id"]),
@@ -131,18 +117,6 @@ def _row_to_rule(row) -> RuleResponse:
     )
 
 
-def _assert_valid_regex(pattern: str, match_type: str):
-    if match_type != "regex":
-        return
-    try:
-        _regex_engine.compile(pattern)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid regex pattern: {e}",
-        )
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -150,48 +124,31 @@ def _assert_valid_regex(pattern: str, match_type: str):
 @router.get("", response_model=List[RuleResponse])
 async def list_rules(
     customer: dict[str, Any] = Depends(get_current_customer),
-    pool: asyncpg.Pool = Depends(get_pool),
+    service: RuleService = Depends(get_rule_service),
 ):
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, customer_id, name, pattern, match_type, scope,
-                   applies_to_email, is_exception, active, description
-            FROM rules
-            WHERE customer_id = $1 AND active = TRUE
-            ORDER BY created_at ASC
-            """,
-            customer["id"],
-        )
+    rows = await service.list_for_customer(customer["id"])
     return [_row_to_rule(r) for r in rows]
 
 
-@router.post("", response_model=RuleResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=RuleResponse, status_code=201)
 async def create_rule(
     body: RuleCreate,
     customer: dict[str, Any] = Depends(get_current_customer),
-    pool: asyncpg.Pool = Depends(get_pool),
+    service: RuleService = Depends(get_rule_service),
 ):
-    _assert_valid_regex(body.pattern, body.match_type)
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO rules
-                (customer_id, name, pattern, match_type, scope,
-                 applies_to_email, is_exception, description)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id, customer_id, name, pattern, match_type, scope,
-                      applies_to_email, is_exception, active, description
-            """,
-            customer["id"],
-            body.name,
-            body.pattern,
-            body.match_type,
-            body.scope,
-            body.applies_to_email,
-            body.is_exception,
-            body.description,
+    try:
+        row = await service.create(
+            customer_id=customer["id"],
+            name=body.name,
+            pattern=body.pattern,
+            match_type=body.match_type,
+            scope=body.scope,
+            applies_to_email=body.applies_to_email,
+            is_exception=body.is_exception,
+            description=body.description,
         )
+    except InvalidRegexPattern as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     return _row_to_rule(row)
 
 
@@ -200,55 +157,33 @@ async def update_rule(
     rule_id: str,
     body: RuleUpdate,
     customer: dict[str, Any] = Depends(get_current_customer),
-    pool: asyncpg.Pool = Depends(get_pool),
+    service: RuleService = Depends(get_rule_service),
 ):
-    async with pool.acquire() as conn:
-        existing = await conn.fetchrow(
-            "SELECT * FROM rules WHERE id = $1 AND customer_id = $2",
-            rule_id, customer["id"],
+    try:
+        row = await service.update(
+            rule_id=rule_id,
+            customer_id=customer["id"],
+            name=body.name,
+            pattern=body.pattern,
+            match_type=body.match_type,
+            scope=body.scope,
+            applies_to_email=body.applies_to_email,
+            is_exception=body.is_exception,
+            description=body.description,
+            active=body.active,
         )
-        if not existing:
-            raise HTTPException(status_code=404, detail="Rule not found")
-
-        new_pattern = body.pattern if body.pattern is not None else existing["pattern"]
-        new_match_type = body.match_type if body.match_type is not None else existing["match_type"]
-        _assert_valid_regex(new_pattern, new_match_type)
-
-        row = await conn.fetchrow(
-            """
-            UPDATE rules SET
-                name             = COALESCE($1, name),
-                pattern          = COALESCE($2, pattern),
-                match_type       = COALESCE($3, match_type),
-                scope            = COALESCE($4, scope),
-                applies_to_email = COALESCE($5, applies_to_email),
-                is_exception     = COALESCE($6, is_exception),
-                description      = COALESCE($7, description),
-                active           = COALESCE($8, active),
-                updated_at       = NOW()
-            WHERE id = $9 AND customer_id = $10
-            RETURNING id, customer_id, name, pattern, match_type, scope,
-                      applies_to_email, is_exception, active, description
-            """,
-            body.name,
-            body.pattern,
-            body.match_type,
-            body.scope,
-            body.applies_to_email,
-            body.is_exception,
-            body.description,
-            body.active,
-            rule_id,
-            customer["id"],
-        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except InvalidRegexPattern as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     return _row_to_rule(row)
 
 
-@router.delete("/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{rule_id}", status_code=204)
 async def delete_rule(
     rule_id: str,
     customer: dict[str, Any] = Depends(get_current_customer),
-    pool: asyncpg.Pool = Depends(get_pool),
+    service: RuleService = Depends(get_rule_service),
 ):
     """Soft-delete (deactivate) a rule.
 
@@ -256,15 +191,7 @@ async def delete_rule(
     for audit purposes (H9). 404 if the rule was already inactive — clients
     should treat that as 'already gone'.
     """
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            """
-            UPDATE rules
-               SET active = FALSE,
-                   updated_at = NOW()
-             WHERE id = $1 AND customer_id = $2 AND active = TRUE
-            """,
-            rule_id, customer["id"],
-        )
-    if result == "UPDATE 0":
-        raise HTTPException(status_code=404, detail="Rule not found")
+    try:
+        await service.soft_delete(rule_id, customer["id"])
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))

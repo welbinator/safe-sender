@@ -142,3 +142,36 @@ async def get_admin_audit_repo(
 ):
     async with pool.acquire() as conn:
         yield AdminAuditRepository(conn)
+
+
+# ---------------------------------------------------------------------------
+# Service factory dependencies
+#
+# Services compose 1+ repository over a single request-scoped connection. We
+# acquire once per dependency so the repos inside share that connection — this
+# is what lets services run multi-step operations transactionally if they need
+# to (today they don't, but the seam is here when we want it).
+# ---------------------------------------------------------------------------
+
+async def get_customer_service(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """CustomerService with scan-log access wired in.
+
+    A single repo+service stack would be enough for profile/SMTP creds, but
+    test-connection needs scan_logs too. One acquire, both repos, one service.
+    """
+    from services import CustomerService
+    async with pool.acquire() as conn:
+        yield CustomerService(
+            customers=CustomerRepository(conn),
+            scan_logs=ScanLogRepository(conn),
+        )
+
+
+async def get_rule_service(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    from services import RuleService
+    async with pool.acquire() as conn:
+        yield RuleService(RuleRepository(conn))
