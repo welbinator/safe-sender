@@ -29,7 +29,7 @@ jobs:
         run: python -m compileall -q -f .
       - name: Run tests
         # H-1: NO `|| true`. Test failures must fail the build.
-        run: pytest tests/ --tb=short
+        run: PYTHONPATH=. pytest tests/ --tb=short
 
   schema-drift:
     name: Schema Drift Check
