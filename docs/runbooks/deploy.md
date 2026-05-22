@@ -69,11 +69,11 @@ curl -fsS --resolve smtp.sendersafety.com:25:5.78.219.242 \
      -X POST telnet://smtp.sendersafety.com:25 || true   # banner check (use swaks if installed)
 ```
 
-Inside the host:
+Inside the host (the backend/smtp images are python-slim — **no `curl`** baked in, use `python -c 'import urllib.request; ...'` instead):
 
 ```
-docker exec safe-sender-backend-1 curl -fsS http://localhost:8000/metrics | head -5
-docker exec safe-sender-smtp-1   curl -fsS http://localhost:9100/health
+docker exec safe-sender-backend-1 python -c 'import urllib.request as u; print(u.urlopen("http://localhost:8000/metrics").read()[:400].decode())'
+docker exec safe-sender-smtp-1   python -c 'import urllib.request as u; print(u.urlopen("http://localhost:9100/health").read().decode())'
 ```
 
 ## 7. Rollback
