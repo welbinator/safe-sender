@@ -13,7 +13,7 @@ from typing import Any, Optional
 import asyncpg
 from fastapi import Cookie, Depends, HTTPException, Request, status
 
-from auth_utils import decode_jwt
+from security import decode_jwt
 from repositories import (
     AdminAuditRepository,
     CustomerRepository,

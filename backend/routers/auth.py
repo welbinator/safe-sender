@@ -19,7 +19,7 @@ import boto3
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from auth_utils import create_jwt, verify_google_id_token
+from security import create_jwt, verify_google_id_token
 from deps import get_auth_service
 from services import AuthService, ConflictError, ServiceError
 from services.email_templates import render_welcome_email
