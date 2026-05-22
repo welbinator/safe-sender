@@ -12,5 +12,6 @@ COPY . .
 # binary (fragile across Python image updates) or sysctl net.ipv4.ip_unprivileged_port_start=0
 # in compose (which weakens the container's port-binding policy globally). Container is
 # tightly scoped: only listens on SMTP ports, no shell access, no secrets baked in.
-CMD ["python", "main.py"]  # nosemgrep: dockerfile.security.missing-user.missing-user
+# nosemgrep: dockerfile.security.missing-user.missing-user
+CMD ["python", "main.py"]
 
