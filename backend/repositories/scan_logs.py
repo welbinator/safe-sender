@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .base import BaseRepository, _as_dicts
+from ._query import WhereBuilder
 
 
 class ScanLogRepository(BaseRepository):
@@ -29,31 +30,24 @@ class ScanLogRepository(BaseRepository):
     ) -> tuple[int, list[dict[str, Any]]]:
         """Paginated, filtered scan-log search joined with rule metadata.
 
-        Returns ``(total_count, rows)``. Builds the WHERE clause once and
-        runs the COUNT + SELECT against the same parameter list.
+        Returns ``(total_count, rows)``. Builds the WHERE clause via
+        :class:`WhereBuilder` (F-33) so adding a filter is one line and we
+        never juggle ``$N`` indices by hand.
         """
-        filters = ["l.customer_id = $1"]
-        params: list[Any] = [customer_id]
-        idx = 2
-
+        wb = WhereBuilder()
+        wb.append("l.customer_id = {}", customer_id)
         if outcome:
-            filters.append(f"l.outcome = ${idx}")
-            params.append(outcome)
-            idx += 1
+            wb.append("l.outcome = {}", outcome)
         if sender:
-            filters.append(f"l.sender ILIKE ${idx}")
-            params.append(f"%{sender}%")
-            idx += 1
+            wb.append("l.sender ILIKE {}", f"%{sender}%")
         if date_from:
-            filters.append(f"l.created_at >= ${idx}")
-            params.append(date_from)
-            idx += 1
+            wb.append("l.created_at >= {}", date_from)
         if date_to:
-            filters.append(f"l.created_at <= ${idx}")
-            params.append(date_to)
-            idx += 1
+            wb.append("l.created_at <= {}", date_to)
 
-        where = " AND ".join(filters)
+        where, params = wb.finish()
+        limit_ph = f"${wb.next_idx}"
+        offset_ph = f"${wb.next_idx + 1}"
 
         total: int = await self.conn.fetchval(
             f"SELECT COUNT(*) FROM scan_logs l WHERE {where}", *params
@@ -70,7 +64,7 @@ class ScanLogRepository(BaseRepository):
             LEFT JOIN rules r ON r.id = l.matched_rule_id
             WHERE {where}
             ORDER BY l.created_at DESC
-            LIMIT ${idx} OFFSET ${idx + 1}
+            LIMIT {limit_ph} OFFSET {offset_ph}
             """,
             *params, limit, offset,
         )

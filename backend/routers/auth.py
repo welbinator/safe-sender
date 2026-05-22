@@ -23,7 +23,8 @@ from pydantic import BaseModel, Field
 
 from security import create_jwt, verify_google_id_token
 from deps import get_auth_service, issue_csrf_token, rate_limit_auth_ip
-from services import AuthService, ConflictError, ServiceError
+from services import ConflictError, ServiceError
+from services.auth import AuthService
 from services.email_dispatch import send_welcome_email
 
 logger = logging.getLogger(__name__)

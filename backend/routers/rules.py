@@ -18,10 +18,9 @@ from deps import get_current_customer, get_rule_service, rate_limit_read, rate_l
 from services import (
     InvalidRegexPattern,
     NotFoundError,
-    RuleService,
     TooManyRules,
 )
-from services.rules import VALID_MATCH_TYPES, VALID_SCOPES
+from services.rules import RuleService, VALID_MATCH_TYPES, VALID_SCOPES
 
 router = APIRouter(prefix="/rules", tags=["rules"])
 

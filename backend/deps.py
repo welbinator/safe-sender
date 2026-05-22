@@ -260,7 +260,7 @@ async def rate_limit_auth_ip(request: Request) -> None:
 
 async def get_customer_service(conn=Depends(get_conn)):
     """CustomerService with scan-log access wired in over the shared conn."""
-    from services import CustomerService
+    from services.customers import CustomerService
     return CustomerService(
         customers=CustomerRepository(conn),
         scan_logs=ScanLogRepository(conn),
@@ -268,23 +268,23 @@ async def get_customer_service(conn=Depends(get_conn)):
 
 
 async def get_rule_service(conn=Depends(get_conn)):
-    from services import RuleService
+    from services.rules import RuleService
     return RuleService(RuleRepository(conn))
 
 
 async def get_auth_service(conn=Depends(get_conn)):
     """AuthService wraps CustomerRepository — Google login upsert path."""
-    from services import AuthService
+    from services.auth import AuthService
     return AuthService(CustomerRepository(conn))
 
 
 async def get_log_service(conn=Depends(get_conn)):
-    from services import LogService
+    from services.logs import LogService
     return LogService(ScanLogRepository(conn))
 
 
 async def get_admin_service(conn=Depends(get_conn)):
-    from services import AdminService
+    from services.admin import AdminService
     return AdminService(
         admin_audit=AdminAuditRepository(conn),
         suppressions=SuppressionRepository(conn),
@@ -292,5 +292,5 @@ async def get_admin_service(conn=Depends(get_conn)):
 
 
 async def get_webhook_service(conn=Depends(get_conn)):
-    from services import SesWebhookService
+    from services.webhooks import SesWebhookService
     return SesWebhookService(SuppressionRepository(conn))

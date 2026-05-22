@@ -34,7 +34,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from deps import get_admin_service
 from db import get_pool
-from services import AdminService, NotFoundError
+from services import NotFoundError
+from services.admin import AdminService
 
 logger = logging.getLogger(__name__)
 

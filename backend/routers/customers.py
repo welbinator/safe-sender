@@ -18,7 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from deps import get_current_customer, get_customer_service
-from services import CustomerService, NotFoundError
+from services import NotFoundError
+from services.customers import CustomerService
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -132,7 +133,7 @@ async def verify_domain_check(
     try:
         result = await service.check_domain_verification(customer)
     except Exception as e:
-        from services import DomainVerificationNotInitialized
+        from services.errors import DomainVerificationNotInitialized
         if isinstance(e, DomainVerificationNotInitialized):
             raise HTTPException(status_code=e.status_code, detail=str(e))
         raise

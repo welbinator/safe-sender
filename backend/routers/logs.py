@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from deps import get_current_customer, get_log_service, rate_limit_read
-from services import LogService
+from services.logs import LogService
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 

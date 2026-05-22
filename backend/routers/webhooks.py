@@ -25,7 +25,7 @@ import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from deps import get_webhook_service
-from services import SesWebhookService
+from services.webhooks import SesWebhookService
 from sns_validator import (
     SNSValidationError,
     validate_subscribe_url,
