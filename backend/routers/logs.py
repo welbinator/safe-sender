@@ -11,7 +11,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
-from deps import get_current_customer, get_log_service
+from deps import get_current_customer, get_log_service, rate_limit_read
 from services import LogService
 
 router = APIRouter(prefix="/logs", tags=["logs"])
@@ -36,7 +36,7 @@ class LogsResponse(BaseModel):
     results: List[LogEntry]
 
 
-@router.get("", response_model=LogsResponse)
+@router.get("", response_model=LogsResponse, dependencies=[Depends(rate_limit_read)])
 async def list_logs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -90,7 +90,7 @@ class TodayStatsResponse(BaseModel):
     top_rules: List[TopRuleStat]
 
 
-@router.get("/stats/today", response_model=TodayStatsResponse)
+@router.get("/stats/today", response_model=TodayStatsResponse, dependencies=[Depends(rate_limit_read)])
 async def stats_today(
     # JS `Date.getTimezoneOffset()` — minutes WEST of UTC. Out-of-range
     # values are clamped (not rejected) so a misbehaving client can't 422

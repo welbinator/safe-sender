@@ -16,10 +16,38 @@ services:
       retries: 10
     # F-51 — resource caps (single-host compose, not swarm).
     # Hetzner CX21 has 2GB / 2 vCPU; budget conservatively. Sum across
-    # services ≈ 1.7GB to leave ~300MB for kernel + cron + sshd.
+    # services ≈ 1.8GB to leave ~200MB for kernel + cron + sshd.
     mem_limit: 640m
     mem_reservation: 256m
     cpus: 0.75
+
+  # F-49 — Redis backing for per-customer rate limiting.
+  # alpine image is ~30MB, RAM cap 96MB (rate-limit buckets are tiny, and
+  # `maxmemory-policy allkeys-lru` evicts cold keys if we ever overshoot).
+  # No persistence: rate-limit state is intentionally ephemeral.
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - "64mb"
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    mem_limit: 96m
+    mem_reservation: 32m
+    cpus: 0.25
 
   backend:
     build: ./backend
@@ -30,8 +58,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://sendersafety:changeme@postgres:5432/sendersafety}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-1}
+      RATE_LIMIT_READ_PER_MIN: ${RATE_LIMIT_READ_PER_MIN:-120}
+      RATE_LIMIT_WRITE_PER_MIN: ${RATE_LIMIT_WRITE_PER_MIN:-30}
+      RATE_LIMIT_AUTH_PER_MIN: ${RATE_LIMIT_AUTH_PER_MIN:-20}
       JWT_SECRET: ${JWT_SECRET:-changeme}
       INTERNAL_SHARED_SECRET: ${INTERNAL_SHARED_SECRET:-}
       SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS:-}

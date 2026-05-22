@@ -14,7 +14,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from deps import get_current_customer, get_rule_service
+from deps import get_current_customer, get_rule_service, rate_limit_read, rate_limit_write
 from services import (
     InvalidRegexPattern,
     NotFoundError,
@@ -126,7 +126,7 @@ def _row_to_rule(row: dict[str, Any]) -> RuleResponse:
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.get("", response_model=List[RuleResponse])
+@router.get("", response_model=List[RuleResponse], dependencies=[Depends(rate_limit_read)])
 async def list_rules(
     customer: dict[str, Any] = Depends(get_current_customer),
     service: RuleService = Depends(get_rule_service),
@@ -135,7 +135,7 @@ async def list_rules(
     return [_row_to_rule(r) for r in rows]
 
 
-@router.post("", response_model=RuleResponse, status_code=201)
+@router.post("", response_model=RuleResponse, status_code=201, dependencies=[Depends(rate_limit_write)])
 async def create_rule(
     body: RuleCreate,
     customer: dict[str, Any] = Depends(get_current_customer),
@@ -159,7 +159,7 @@ async def create_rule(
     return _row_to_rule(row)
 
 
-@router.put("/{rule_id}", response_model=RuleResponse)
+@router.put("/{rule_id}", response_model=RuleResponse, dependencies=[Depends(rate_limit_write)])
 async def update_rule(
     rule_id: str,
     body: RuleUpdate,
@@ -188,7 +188,7 @@ async def update_rule(
     return _row_to_rule(row)
 
 
-@router.delete("/{rule_id}", status_code=204)
+@router.delete("/{rule_id}", status_code=204, dependencies=[Depends(rate_limit_write)])
 async def delete_rule(
     rule_id: str,
     customer: dict[str, Any] = Depends(get_current_customer),
