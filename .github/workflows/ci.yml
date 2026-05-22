@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, sprint-c1]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   test-backend:
@@ -19,9 +19,17 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest
+        # requirements-dev.txt pulls in requirements.txt + pytest + pgserver
+        # (which ships its own postgres binaries — no system packages needed).
+        run: pip install -r requirements-dev.txt
+      - name: Syntax check (compileall)
+        # Sprint C1 t9: cheap pre-test gate. Catches SyntaxError in seconds
+        # before pytest spends 13s spinning up pgserver. Pure syntax — does
+        # not execute module bodies, so no env vars required.
+        run: python -m compileall -q -f .
       - name: Run tests
-        run: pytest tests/ --tb=short || true
+        # H-1: NO `|| true`. Test failures must fail the build.
+        run: pytest tests/ --tb=short
 
   test-smtp:
     name: Test SMTP
@@ -37,4 +45,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pytest
       - name: Run tests
-        run: pytest tests/ --tb=short || true
+        # TODO(sprint-c2): smtp/tests/test_smtp.py is stale against the
+        # current handler signature (needs `port` kwarg) and one regex
+        # assertion regressed. Refactor under outbox/worker work in C2,
+        # then drop continue-on-error.
+        continue-on-error: true
+        run: pytest tests/ --tb=short

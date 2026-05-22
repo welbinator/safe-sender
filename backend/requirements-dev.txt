@@ -1,0 +1,10 @@
+# Backend test/dev dependencies. Production requirements live in
+# requirements.txt; this file is for CI + local pytest runs only.
+
+-r requirements.txt
+
+pytest>=8.0
+pytest-asyncio>=0.23
+# pgserver ships its own postgres binaries — used by tests/conftest.py to spin
+# up an ephemeral Postgres per test session. No docker / system packages needed.
+pgserver>=0.1.4

@@ -96,15 +96,14 @@ def test_rule_pattern_length_cap_enforced(monkeypatch):
 
 
 def test_rule_invalid_regex_rejected():
-    """_assert_valid_regex raises 422 on a regex re2 can't compile."""
-    from fastapi import HTTPException
-    from routers import rules as rules_mod
-    with pytest.raises(HTTPException) as exc:
-        rules_mod._assert_valid_regex("(unclosed", "regex")
-    assert exc.value.status_code == 422
+    """RuleService.assert_valid_regex raises InvalidRegexPattern on bad regex."""
+    from services import InvalidRegexPattern
+    from services.rules import RuleService
+    with pytest.raises(InvalidRegexPattern):
+        RuleService.assert_valid_regex("(unclosed", "regex")
 
 
 def test_rule_keyword_skips_regex_validation():
-    from routers import rules as rules_mod
+    from services.rules import RuleService
     # Should not raise — keyword type bypasses regex compile.
-    rules_mod._assert_valid_regex("any string at all (^.+$)", "keyword")
+    RuleService.assert_valid_regex("any string at all (^.+$)", "keyword")

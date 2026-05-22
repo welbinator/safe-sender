@@ -26,17 +26,50 @@ Internal (SMTP service only, not exposed via nginx):
 import hashlib
 import os
 from typing import Optional
+from urllib.parse import urlparse
+
+# ---------------------------------------------------------------------------
+# Sprint C1: Fail-fast on missing/weak DATABASE_URL (audit H-3).
+# Runs BEFORE other imports so the guard fires even if internal_auth or
+# downstream modules have their own (less specific) startup checks.
+# ---------------------------------------------------------------------------
+_WEAK_DB_PASSWORDS = {"changeme", "secret", "password", "default", "test", ""}
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is required. Refusing to start with an insecure default. "
+        "Set DATABASE_URL in the environment (see .env.example)."
+    )
+_db_password = (urlparse(DATABASE_URL).password or "").lower()
+if _db_password in _WEAK_DB_PASSWORDS:
+    raise RuntimeError(
+        "DATABASE_URL contains a weak/default password "
+        f"({_db_password!r}). Set a strong password before starting."
+    )
+print(f"[main] DATABASE_URL host portion: ...@{DATABASE_URL.split('@')[-1]}", flush=True)
+
+# ---------------------------------------------------------------------------
+# Sprint C1 HOTFIX (audit C-1): Refuse to start if test-token bypass is
+# enabled in production. ALLOW_TEST_TOKENS=1 lets `auth/google` accept
+# `test:<json>` strings as a valid Google ID token — fine for CI, catastrophic
+# in prod (anyone can mint a session for any email).
+# ---------------------------------------------------------------------------
+_ENV = os.environ.get("ENV", "").lower()
+_ALLOW_TEST_TOKENS = os.environ.get("ALLOW_TEST_TOKENS") == "1"
+if _ENV in ("production", "prod") and _ALLOW_TEST_TOKENS:
+    raise RuntimeError(
+        "FATAL: ALLOW_TEST_TOKENS=1 is set while ENV=production. "
+        "This would let anyone forge a session JWT by POSTing a fake "
+        "Google ID token. Unset ALLOW_TEST_TOKENS (or set it to 0) "
+        "before starting. Refusing to start."
+    )
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from internal_auth import require_internal_secret
-
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://sendersafety:changeme@postgres:5432/sendersafety"
-)
-print(f"[main] DATABASE_URL host portion: ...@{DATABASE_URL.split('@')[-1]}", flush=True)
 
 app = FastAPI(title="Sender Safety API", version="0.3.0")
 # ---------------------------------------------------------------------------

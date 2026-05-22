@@ -7,6 +7,18 @@ const BASE_URL = import.meta.env.VITE_API_URL || '/api';
 // localStorage — XSS can no longer steal the JWT.
 const api = axios.create({ baseURL: BASE_URL, withCredentials: true });
 
+// Sprint C1 CSRF hotfix: every request carries a custom header. The backend
+// requires this header on cookie-authenticated mutations (POST/PUT/PATCH/DELETE).
+// Browsers refuse to attach custom headers cross-origin without a CORS
+// preflight — which our backend doesn't grant to third-party origins — so a
+// malicious site can't forge a state-changing request even while the user's
+// session cookie is live.
+api.interceptors.request.use((config) => {
+  config.headers = config.headers || {};
+  config.headers['X-Requested-With'] = 'sender-safety';
+  return config;
+});
+
 api.interceptors.response.use(
   r => r,
   err => {
