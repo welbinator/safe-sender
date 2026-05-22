@@ -49,6 +49,9 @@ if _db_password in _WEAK_DB_PASSWORDS:
         "DATABASE_URL contains a weak/default password "
         f"({_db_password!r}). Set a strong password before starting."
     )
+from logging_config import configure_logging, RequestIdMiddleware  # noqa: E402
+
+configure_logging()
 logger = logging.getLogger("sender_safety.backend")
 
 logger.info("DATABASE_URL host portion: ...@%s", DATABASE_URL.split("@")[-1])
@@ -77,6 +80,7 @@ from internal_auth import require_internal_secret
 from db import close_pool, get_pool, set_pool
 
 app = FastAPI(title="Sender Safety API", version="0.3.0")
+app.add_middleware(RequestIdMiddleware)
 # ---------------------------------------------------------------------------
 # Database connection pool (created on startup; lives in db.py — F-13)
 # ---------------------------------------------------------------------------

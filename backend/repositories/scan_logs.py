@@ -75,3 +75,96 @@ class ScanLogRepository(BaseRepository):
             *params, limit, offset,
         )
         return total, _as_dicts(rows)
+
+    async def today_stats(
+        self,
+        *,
+        customer_id: Any,
+        tz_offset_minutes: int = 0,
+    ) -> dict[str, Any]:
+        """Server-side aggregation for the dashboard Overview card.
+
+        F-39: previously the dashboard pulled `/logs?limit=500` and tallied
+        client-side, capping accurate stats at 500 rows/day. This computes
+        scanned/blocked/allowed + top-5 rules in SQL.
+
+        F-56: `tz_offset_minutes` is the client's `Date.getTimezoneOffset()`
+        — minutes WEST of UTC, positive in the Americas. We bracket the
+        client's local "today" in UTC so users east of UTC don't see
+        yesterday's evening scans bleed into today.
+        """
+        # Convert JS offset (minutes west of UTC, positive in Americas) to a
+        # signed-minute shift we can add to UTC to get the client's wall
+        # clock. JS: PDT = +420, so client_now = utc_now - 420min.
+        # We treat "today" as [client_midnight_today, client_midnight_tomorrow)
+        # then convert that window back to UTC for the query.
+        async with self.conn.transaction():
+            counts_row = await self.conn.fetchrow(
+                """
+                WITH bounds AS (
+                    SELECT
+                        date_trunc(
+                            'day',
+                            (now() AT TIME ZONE 'UTC')
+                                - make_interval(mins => $2)
+                        ) + make_interval(mins => $2) AS day_start
+                ),
+                day_window AS (
+                    SELECT
+                        day_start AS lo,
+                        day_start + interval '1 day' AS hi
+                    FROM bounds
+                )
+                SELECT
+                    COUNT(*) FILTER (WHERE TRUE)                  AS scanned,
+                    COUNT(*) FILTER (WHERE outcome = 'blocked')   AS blocked,
+                    COUNT(*) FILTER (WHERE outcome = 'allowed')   AS allowed
+                FROM scan_logs, day_window
+                WHERE customer_id = $1
+                  AND created_at >= day_window.lo
+                  AND created_at <  day_window.hi
+                """,
+                customer_id, tz_offset_minutes,
+            )
+            top_rows = await self.conn.fetch(
+                """
+                WITH bounds AS (
+                    SELECT
+                        date_trunc(
+                            'day',
+                            (now() AT TIME ZONE 'UTC')
+                                - make_interval(mins => $2)
+                        ) + make_interval(mins => $2) AS day_start
+                ),
+                day_window AS (
+                    SELECT
+                        day_start AS lo,
+                        day_start + interval '1 day' AS hi
+                    FROM bounds
+                )
+                SELECT
+                    l.matched_rule_id,
+                    COALESCE(r.name, r.pattern, '(deleted rule)') AS label,
+                    COUNT(*) AS triggers
+                FROM scan_logs l
+                LEFT JOIN rules r ON r.id = l.matched_rule_id
+                CROSS JOIN day_window
+                WHERE l.customer_id = $1
+                  AND l.matched_rule_id IS NOT NULL
+                  AND l.created_at >= day_window.lo
+                  AND l.created_at <  day_window.hi
+                GROUP BY l.matched_rule_id, label
+                ORDER BY triggers DESC
+                LIMIT 5
+                """,
+                customer_id, tz_offset_minutes,
+            )
+        return {
+            "scanned": int(counts_row["scanned"] or 0),
+            "blocked": int(counts_row["blocked"] or 0),
+            "allowed": int(counts_row["allowed"] or 0),
+            "top_rules": [
+                {"label": r["label"], "triggers": int(r["triggers"])}
+                for r in top_rows
+            ],
+        }

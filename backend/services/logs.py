@@ -44,3 +44,15 @@ class LogService:
             offset=offset,
         )
         return LogPage(total=total, page=page, page_size=page_size, results=rows)
+
+    async def today_stats(
+        self,
+        *,
+        customer_id: Any,
+        tz_offset_minutes: int = 0,
+    ) -> dict[str, Any]:
+        """F-39: server-side aggregation for the Overview card."""
+        return await self.scan_logs.today_stats(
+            customer_id=customer_id,
+            tz_offset_minutes=tz_offset_minutes,
+        )
