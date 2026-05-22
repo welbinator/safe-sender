@@ -49,11 +49,15 @@ GOOGLE_VALID_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 WORKSPACE_ONLY = os.environ.get("WORKSPACE_ONLY", "1") == "1"
 
 
-# Toggle for gradual rollout. When 0, old tokens without jti/iss/aud still
-# decode (only sub+exp+iat required). When 1, all new strict claims required.
-# Default off so deploying Sprint B doesn't instantly invalidate every session;
-# flip to 1 after JWT_EXPIRE_DAYS has rolled all tokens forward.
-STRICT_JWT_CLAIMS = os.environ.get("STRICT_JWT_CLAIMS", "0") == "1"
+# Sprint C1 HOTFIX (audit C-2): Strict JWT validation is now the only mode.
+# The previous lenient branch (no iss/aud/jti checks) existed only as a
+# rollout shim during Sprint B and has been removed. Tokens issued before
+# this commit that lack iss/aud/jti will fail validation — users will be
+# forced to re-login. Worst case: ~7 days of session churn (JWT_EXPIRE_DAYS).
+#
+# STRICT_JWT_CLAIMS env var is retained for visibility but is now informational
+# only — setting it to 0 has no effect.
+STRICT_JWT_CLAIMS = True
 
 
 def create_jwt(customer_id: str, email: str) -> str:
@@ -78,37 +82,22 @@ def create_jwt(customer_id: str, email: str) -> str:
 def decode_jwt(token: str) -> dict[str, Any]:
     """Decode and verify a JWT.
 
-    When STRICT_JWT_CLAIMS=1 (post-rollout), requires sub/exp/iat/jti/iss/aud.
-    Otherwise only sub/exp/iat — used during the rollout window so existing
-    tokens issued before the upgrade keep working until they expire naturally.
-    Raises HTTPException 401 on any failure.
+    Requires sub/exp/iat/jti/iss/aud — no lenient fallback. Raises
+    HTTPException 401 on any failure (expired, invalid signature, missing
+    claim, wrong issuer/audience).
     """
-    if STRICT_JWT_CLAIMS:
-        required = ["sub", "exp", "iat", "jti", "iss", "aud"]
-        decode_kwargs = dict(
-            issuer=JWT_ISSUER,
-            audience=JWT_AUDIENCE,
-            options={
-                "require": required,
-                "verify_iat": True,
-                "verify_nbf": True,
-                "verify_exp": True,
-                "verify_iss": True,
-                "verify_aud": True,
-            },
-        )
-    else:
-        # Lenient mode: don't verify iss/aud; tolerate missing jti.
-        # Still enforce expiry & signature.
-        decode_kwargs = dict(
-            options={
-                "require": ["sub", "exp", "iat"],
-                "verify_iat": True,
-                "verify_exp": True,
-                "verify_aud": False,
-                "verify_iss": False,
-            },
-        )
+    decode_kwargs = dict(
+        issuer=JWT_ISSUER,
+        audience=JWT_AUDIENCE,
+        options={
+            "require": ["sub", "exp", "iat", "jti", "iss", "aud"],
+            "verify_iat": True,
+            "verify_nbf": True,
+            "verify_exp": True,
+            "verify_iss": True,
+            "verify_aud": True,
+        },
+    )
     try:
         payload = jwt.decode(
             token, JWT_SECRET, algorithms=[JWT_ALGORITHM], **decode_kwargs
