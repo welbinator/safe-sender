@@ -20,7 +20,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from security import create_jwt, verify_google_id_token
-from deps import get_auth_service
+from deps import get_auth_service, issue_csrf_token
 from services import AuthService, ConflictError, ServiceError
 from services.email_templates import render_welcome_email
 
@@ -138,6 +138,20 @@ async def auth_google(
         samesite="lax",
     )
 
+    # C3 F-11: paired non-HttpOnly CSRF token. JS-readable BY DESIGN — the
+    # dashboard reads this cookie and mirrors it into the X-CSRF-Token header
+    # on every mutation. Cross-origin attackers can't read it (SOP) and can't
+    # guess 256 bits, so they can't satisfy the backend's compare_digest check.
+    response.set_cookie(
+        key="csrf_token",
+        value=issue_csrf_token(),
+        max_age=60 * 60 * 24 * 7,
+        path="/",
+        httponly=False,
+        secure=os.environ.get("COOKIE_INSECURE") != "1",
+        samesite="lax",
+    )
+
     if result.is_new:
         # H13: off the request path — runs after the response is sent.
         background_tasks.add_task(
@@ -157,6 +171,7 @@ async def auth_google(
 
 @router.post("/logout", status_code=204)
 async def auth_logout(response: Response):
-    """Clear the session cookie. Idempotent."""
+    """Clear the session + csrf cookies. Idempotent."""
     response.delete_cookie("session", path="/")
+    response.delete_cookie("csrf_token", path="/")
     return Response(status_code=204)

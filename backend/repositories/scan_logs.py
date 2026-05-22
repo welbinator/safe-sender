@@ -61,7 +61,7 @@ class ScanLogRepository(BaseRepository):
         rows = await self.conn.fetch(
             f"""
             SELECT
-                l.id, l.sender, l.recipient, l.subject, l.outcome,
+                l.id, l.sender, l.recipient, l.outcome,
                 l.matched_rule_id, l.created_at,
                 r.name        AS matched_rule_name,
                 r.pattern     AS matched_rule_pattern,

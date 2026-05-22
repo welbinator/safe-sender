@@ -392,9 +392,13 @@ async def _log_scan(
     subject_hash: str,
     matched_rule_id: int | None,
     outcome: str,
-    subject: str = "",
 ) -> None:
-    """POST a scan log entry to the backend (fire-and-forget style, but awaited)."""
+    """POST a scan log entry to the backend (fire-and-forget style, but awaited).
+
+    F-08: the plaintext `subject` is intentionally NOT sent. Only the HMAC
+    `subject_hash` is persisted, honoring the privacy guarantee at the top of
+    this file.
+    """
     url = f"{BACKEND_URL}/internal/scan-log"
     payload = {
         "customer_id": customer_id,
@@ -403,7 +407,6 @@ async def _log_scan(
         "subject_hash": subject_hash,
         "matched_rule_id": matched_rule_id,
         "outcome": outcome,
-        "subject": subject,
     }
     try:
         async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS) as session:
@@ -669,7 +672,6 @@ class SafeSenderHandler:
                 subject_hash=subject_hash,
                 matched_rule_id=matched_rule["id"],
                 outcome="blocked",
-                subject=subject,
             )
             return "550 5.7.1 Message rejected: policy violation"
 
@@ -685,7 +687,6 @@ class SafeSenderHandler:
                     subject_hash=subject_hash,
                     matched_rule_id=None,
                     outcome="blocked",
-                    subject=subject,
                 )
                 return "550 5.1.8 Recipient address suppressed due to prior bounce or complaint"
 
@@ -709,7 +710,6 @@ class SafeSenderHandler:
                 subject_hash=subject_hash,
                 matched_rule_id=None,
                 outcome="blocked",
-                subject=subject,
             )
             return "451 4.3.0 Delivery failure — please retry"
 
@@ -720,7 +720,6 @@ class SafeSenderHandler:
             subject_hash=subject_hash,
             matched_rule_id=None,
             outcome="allowed",
-            subject=subject,
         )
         return "250 OK"
 
