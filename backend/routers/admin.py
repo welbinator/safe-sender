@@ -36,7 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from deps import get_admin_service
-from main import get_pool
+from db import get_pool
 from services import AdminService, NotFoundError
 
 logger = logging.getLogger(__name__)

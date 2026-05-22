@@ -74,17 +74,16 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from internal_auth import require_internal_secret
+from db import close_pool, get_pool, set_pool
 
 app = FastAPI(title="Sender Safety API", version="0.3.0")
 # ---------------------------------------------------------------------------
-# Database connection pool (created on startup)
+# Database connection pool (created on startup; lives in db.py — F-13)
 # ---------------------------------------------------------------------------
-_pool: asyncpg.Pool | None = None
 
 
 @app.on_event("startup")
 async def startup():
-    global _pool
     import asyncio
     import socket as _socket
 
@@ -105,7 +104,7 @@ async def startup():
             # Docker/WSL2 kernel combo even for raw IPs.
             from urllib.parse import urlparse
             _u = urlparse(DATABASE_URL)
-            _pool = await asyncio.wait_for(
+            pool = await asyncio.wait_for(
                 asyncpg.create_pool(
                     host=_u.hostname,
                     port=_u.port or 5432,
@@ -119,6 +118,7 @@ async def startup():
                 ),
                 timeout=15,
             )
+            set_pool(pool)
             return
         except Exception as e:
             last_err = e
@@ -130,14 +130,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    if _pool:
-        await _pool.close()
-
-
-def get_pool() -> asyncpg.Pool:
-    if _pool is None:
-        raise RuntimeError("DB pool not initialised")
-    return _pool
+    await close_pool()
 
 
 # ---------------------------------------------------------------------------

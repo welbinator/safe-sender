@@ -20,6 +20,7 @@ from typing import Any, Optional
 import asyncpg
 from fastapi import Cookie, Depends, HTTPException, Request, status
 
+from db import get_pool  # F-13: real module, no more circular-import dodge
 from security import decode_jwt
 from repositories import (
     AdminAuditRepository,
@@ -50,13 +51,8 @@ def issue_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-async def get_pool() -> asyncpg.Pool:
-    """
-    Re-export the pool stored on app state.
-    Import the app object lazily to avoid circular imports.
-    """
-    from main import get_pool as _get_pool
-    return _get_pool()
+# F-13: get_pool is imported from db at top of file; Depends(get_pool) works
+# directly because FastAPI accepts sync callables that return the resource.
 
 
 def _extract_token(request: Request, session_cookie: Optional[str]) -> str:
