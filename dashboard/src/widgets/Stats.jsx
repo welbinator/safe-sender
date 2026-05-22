@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '../api';
+import { extractErrorMessage } from '../errors';
+import { SkeletonStats } from '../components/Skeleton';
 import styles from './Stats.module.css';
 
 /**
@@ -22,11 +24,18 @@ export default function Stats() {
     const tzOffset = new Date().getTimezoneOffset();
     api.get('/logs/stats/today', { params: { tz_offset_minutes: tzOffset } })
       .then(r => setData(r.data))
-      .catch(() => setError('Failed to load stats'));
+      .catch((err) => setError(extractErrorMessage(err, 'Failed to load stats')));
   }, []);
 
-  if (error) return <div className={styles.error}>{error}</div>;
-  if (!data) return <div className={styles.loading}>Loading…</div>;
+  if (error) return <div className={styles.error} role="alert">{error}</div>;
+  if (!data) {
+    return (
+      <div className={styles.container}>
+        <h1 className={styles.title}>Overview</h1>
+        <SkeletonStats />
+      </div>
+    );
+  }
 
   return (
     <div className={styles.container}>

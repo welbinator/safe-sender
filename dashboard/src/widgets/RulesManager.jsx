@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { getRules, createRule, updateRule, deleteRule } from '../api';
+import { extractErrorMessage } from '../errors';
 import styles from './RulesManager.module.css';
 
 const BLANK = { name: '', pattern: '', match_type: 'string', scope: 'both', applies_to: '', is_exception: false };
@@ -11,7 +12,7 @@ export default function RulesManager() {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const load = () => getRules().then(r => setRules(r.data)).catch(() => setError('Failed to load rules'));
+  const load = () => getRules().then(r => setRules(r.data)).catch((err) => setError(extractErrorMessage(err, 'Failed to load rules')));
 
   useEffect(() => { load(); }, []);
 
@@ -29,7 +30,7 @@ export default function RulesManager() {
       setEditId(null);
       await load();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to save rule');
+      setError(extractErrorMessage(err, 'Failed to save rule'));
     } finally {
       setSaving(false);
     }
@@ -52,8 +53,8 @@ export default function RulesManager() {
     try {
       await deleteRule(id);
       await load();
-    } catch {
-      setError('Failed to delete rule');
+    } catch (err) {
+      setError(extractErrorMessage(err, 'Failed to delete rule'));
     }
   };
 
