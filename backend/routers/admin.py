@@ -5,10 +5,13 @@ Protected by ADMIN_SECRET env var (Bearer token).
 
 Sprint C1 hotfix (audit C-4):
   - Optional IP allowlist via ADMIN_IP_ALLOWLIST (comma-separated CIDRs/IPs).
-    When set, requests from outside the list are rejected with 403.
   - admin_audit_log: every authenticated admin action writes one row
     (ip, method, path, status, optional detail).
   - Per-IP rate limit (in-process token bucket): default 30 req/min per IP.
+
+Sprint C1 t7: data access moved into AdminService + AdminAuditRepository.
+Router keeps the auth/allowlist/rate-limit dependency (security primitive) and
+end-of-handler audit calls; everything else goes through the service.
 
 Endpoints:
   GET    /admin/customers           — list all customers with stats
@@ -17,6 +20,7 @@ Endpoints:
   DELETE /admin/suppressed/{email}  — remove from suppression list
   GET    /admin/audit               — recent audit log entries
 """
+from __future__ import annotations
 
 import hmac
 import ipaddress
@@ -31,7 +35,9 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from deps import get_admin_service
 from main import get_pool
+from services import AdminService, NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +73,6 @@ def _client_ip(request: Request) -> str:
     by our own nginx (we always set it on /api/admin/* in nginx.conf)."""
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
-        # First entry is the original client.
         return xff.split(",")[0].strip()
     if request.client:
         return request.client.host
@@ -84,8 +89,8 @@ def _ip_allowed(ip: str) -> bool:
     return any(addr in net for net in _ADMIN_ALLOWLIST)
 
 
-# ── Per-IP rate limiter (in-process; sufficient for the single-replica
-# admin panel — if we ever scale we'll move it into Postgres). ───────────────
+# ── Per-IP rate limiter (in-process; sufficient for the single-replica admin
+# panel — if we ever scale we'll move it into Postgres). ─────────────────────
 _rate_lock = Lock()
 _rate_buckets: "dict[str, deque]" = {}
 
@@ -103,10 +108,16 @@ def _check_rate_limit(ip: str) -> bool:
         return True
 
 
-# ── Audit log ────────────────────────────────────────────────────────────────
-async def _write_audit(
+# ── Audit writer used by the auth dependency. Handlers use AdminService.write_audit
+# (same target table, different transport). We can't hand AdminService to the
+# dependency cleanly (it needs to fail-audit BEFORE auth resolves), so the
+# dependency gets the pool directly and writes through asyncpg. The repository
+# class is the only thing that knows the SQL — we mirror that here as a single
+# parameterized INSERT to avoid duplicating it. ──────────────────────────────
+async def _audit_from_dependency(
     ip: str, method: str, path: str, status_code: int, detail: Optional[dict] = None
 ) -> None:
+    """Fire-and-forget audit write from the auth dependency."""
     try:
         pool = get_pool()
         async with pool.acquire() as conn:
@@ -138,20 +149,26 @@ async def _require_admin(
     ip = _client_ip(request)
 
     if not _ip_allowed(ip):
-        await _write_audit(ip, request.method, request.url.path, 403,
-                           {"reason": "ip_not_allowlisted"})
+        await _audit_from_dependency(
+            ip, request.method, request.url.path, 403,
+            {"reason": "ip_not_allowlisted"},
+        )
         raise HTTPException(status_code=403, detail="IP not allowed")
 
     if not _check_rate_limit(ip):
-        await _write_audit(ip, request.method, request.url.path, 429,
-                           {"reason": "rate_limited"})
+        await _audit_from_dependency(
+            ip, request.method, request.url.path, 429,
+            {"reason": "rate_limited"},
+        )
         raise HTTPException(status_code=429, detail="Too many requests")
 
     if not credentials or not hmac.compare_digest(
         credentials.credentials or "", ADMIN_SECRET
     ):
-        await _write_audit(ip, request.method, request.url.path, 401,
-                           {"reason": "bad_secret"})
+        await _audit_from_dependency(
+            ip, request.method, request.url.path, 401,
+            {"reason": "bad_secret"},
+        )
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     # Success path — audit at the end of each handler so we capture
@@ -159,26 +176,32 @@ async def _require_admin(
     return ip
 
 
+async def _audit_ok(
+    admin: AdminService,
+    request: Request,
+    ip: str,
+    status_code: int,
+    detail: Optional[dict[str, Any]] = None,
+) -> None:
+    """End-of-handler audit shortcut that goes through the service."""
+    await admin.write_audit(
+        ip=ip,
+        method=request.method,
+        path=request.url.path,
+        status_code=status_code,
+        detail=detail,
+    )
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 @router.get("/customers")
-async def list_customers(request: Request, ip: str = Depends(_require_admin)):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-                c.id, c.email, c.name, c.domain, c.domain_verified, c.created_at,
-                COUNT(sl.id) FILTER (WHERE sl.outcome = 'allowed') AS emails_allowed,
-                COUNT(sl.id) FILTER (WHERE sl.outcome = 'blocked') AS emails_blocked,
-                MAX(sl.created_at) AS last_activity
-            FROM customers c
-            LEFT JOIN scan_logs sl ON sl.customer_id = c.id
-            GROUP BY c.id
-            ORDER BY c.created_at DESC
-            """
-        )
-    await _write_audit(ip, request.method, request.url.path, 200,
-                       {"count": len(rows)})
+async def list_customers(
+    request: Request,
+    ip: str = Depends(_require_admin),
+    admin: AdminService = Depends(get_admin_service),
+):
+    rows = await admin.list_customers()
+    await _audit_ok(admin, request, ip, 200, {"count": len(rows)})
     return [
         {
             "id": str(r["id"]),
@@ -196,35 +219,24 @@ async def list_customers(request: Request, ip: str = Depends(_require_admin)):
 
 
 @router.get("/stats")
-async def system_stats(request: Request, ip: str = Depends(_require_admin)):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT
-                (SELECT COUNT(*) FROM customers) AS total_customers,
-                (SELECT COUNT(*) FROM customers WHERE domain_verified = true) AS verified_customers,
-                (SELECT COUNT(*) FROM scan_logs) AS total_scans,
-                (SELECT COUNT(*) FROM scan_logs WHERE outcome = 'blocked') AS total_blocked,
-                (SELECT COUNT(*) FROM scan_logs WHERE created_at > NOW() - INTERVAL '24 hours') AS scans_24h,
-                (SELECT COUNT(*) FROM scan_logs WHERE outcome = 'blocked' AND created_at > NOW() - INTERVAL '24 hours') AS blocked_24h,
-                (SELECT COUNT(*) FROM suppressed_addresses) AS suppressed_addresses
-            """
-        )
-    await _write_audit(ip, request.method, request.url.path, 200)
-    return dict(row)
+async def system_stats(
+    request: Request,
+    ip: str = Depends(_require_admin),
+    admin: AdminService = Depends(get_admin_service),
+):
+    stats = await admin.system_stats()
+    await _audit_ok(admin, request, ip, 200)
+    return stats
 
 
 @router.get("/suppressed")
-async def list_suppressed(request: Request, ip: str = Depends(_require_admin)):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT email, reason, detail, suppressed_at FROM suppressed_addresses "
-            "ORDER BY suppressed_at DESC LIMIT 500"
-        )
-    await _write_audit(ip, request.method, request.url.path, 200,
-                       {"count": len(rows)})
+async def list_suppressed(
+    request: Request,
+    ip: str = Depends(_require_admin),
+    admin: AdminService = Depends(get_admin_service),
+):
+    rows = await admin.list_suppressed()
+    await _audit_ok(admin, request, ip, 200, {"count": len(rows)})
     return [
         {
             "email": r["email"],
@@ -238,20 +250,17 @@ async def list_suppressed(request: Request, ip: str = Depends(_require_admin)):
 
 @router.delete("/suppressed/{email}")
 async def remove_suppressed(
-    email: str, request: Request, ip: str = Depends(_require_admin)
+    email: str,
+    request: Request,
+    ip: str = Depends(_require_admin),
+    admin: AdminService = Depends(get_admin_service),
 ):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM suppressed_addresses WHERE email = $1", email.lower()
-        )
-    deleted = int(result.split()[-1])
-    if deleted == 0:
-        await _write_audit(ip, request.method, request.url.path, 404,
-                           {"email": email.lower()})
+    try:
+        deleted = await admin.remove_suppression(email)
+    except NotFoundError:
+        await _audit_ok(admin, request, ip, 404, {"email": email.lower()})
         raise HTTPException(status_code=404, detail="Address not found in suppression list")
-    await _write_audit(ip, request.method, request.url.path, 200,
-                       {"email": email.lower(), "deleted": deleted})
+    await _audit_ok(admin, request, ip, 200, {"email": email.lower(), "deleted": deleted})
     return {"status": "removed", "email": email.lower()}
 
 
@@ -260,18 +269,11 @@ async def list_audit(
     request: Request,
     ip: str = Depends(_require_admin),
     limit: int = 200,
+    admin: AdminService = Depends(get_admin_service),
 ):
     """Recent admin audit entries (newest first)."""
-    limit = max(1, min(limit, 1000))
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, created_at, ip, method, path, status_code, detail "
-            "FROM admin_audit_log ORDER BY id DESC LIMIT $1",
-            limit,
-        )
-    await _write_audit(ip, request.method, request.url.path, 200,
-                       {"returned": len(rows)})
+    rows = await admin.list_audit(limit=limit)
+    await _audit_ok(admin, request, ip, 200, {"returned": len(rows)})
     return [
         {
             "id": r["id"],

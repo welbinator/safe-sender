@@ -16,20 +16,35 @@ Conventions
   bcrypt, secrets) — that's the whole point of having them.
 """
 from .errors import (
+    ConflictError,
     DomainAlreadyVerified,
     DomainVerificationNotInitialized,
     InvalidRegexPattern,
     NotFoundError,
     ServiceError,
 )
+from .admin import AdminService
+from .auth import AuthService, LoginResult
 from .customers import CustomerService
+from .logs import LogPage, LogService
 from .rules import RuleService
+from .webhooks import ProcessResult, SesWebhookService
 
 __all__ = [
+    "AdminService",
+    "AuthService",
     "CustomerService",
+    "LogService",
     "RuleService",
+    "SesWebhookService",
+    # data carriers
+    "LoginResult",
+    "LogPage",
+    "ProcessResult",
+    # exceptions
     "ServiceError",
     "NotFoundError",
+    "ConflictError",
     "InvalidRegexPattern",
     "DomainAlreadyVerified",
     "DomainVerificationNotInitialized",

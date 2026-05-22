@@ -44,6 +44,10 @@ def _make_request(*, cookie_token=None, auth_header=None):
     # Starlette Headers is case-insensitive; dict.get is good enough here
     # because _extract_token() looks up "authorization" (already lowercase).
     r.headers = headers
+    # Sprint C1 C-3 hotfix: _extract_token() inspects request.method on the
+    # cookie path to enforce CSRF on mutating verbs. These tests focus on the
+    # cookie/header precedence rules, so default to GET.
+    r.method = "GET"
     return r
 
 

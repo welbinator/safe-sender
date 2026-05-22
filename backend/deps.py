@@ -175,3 +175,39 @@ async def get_rule_service(
     from services import RuleService
     async with pool.acquire() as conn:
         yield RuleService(RuleRepository(conn))
+
+
+async def get_auth_service(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """AuthService wraps CustomerRepository — Google login upsert path."""
+    from services import AuthService
+    async with pool.acquire() as conn:
+        yield AuthService(CustomerRepository(conn))
+
+
+async def get_log_service(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    from services import LogService
+    async with pool.acquire() as conn:
+        yield LogService(ScanLogRepository(conn))
+
+
+async def get_admin_service(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    from services import AdminService
+    async with pool.acquire() as conn:
+        yield AdminService(
+            admin_audit=AdminAuditRepository(conn),
+            suppressions=SuppressionRepository(conn),
+        )
+
+
+async def get_webhook_service(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    from services import SesWebhookService
+    async with pool.acquire() as conn:
+        yield SesWebhookService(SuppressionRepository(conn))
