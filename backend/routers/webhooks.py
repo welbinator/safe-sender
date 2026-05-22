@@ -98,6 +98,31 @@ async def ses_webhook(request: Request):
     reason = "bounce"
     detail = ""
 
+    # Sprint B C16: pull the customer_id tag we attach in smtp/main.py when
+    # calling SES SendRawEmail. SES echoes tags back on bounce/complaint
+    # notifications under `mail.tags.<TagName>` as a list of strings.
+    mail = inner.get("mail", {}) or {}
+    tags = mail.get("tags", {}) or {}
+    raw_tag = tags.get("customer_id") or tags.get("customerId") or []
+    if isinstance(raw_tag, list) and raw_tag:
+        customer_id_tag = str(raw_tag[0]).strip() or None
+    elif isinstance(raw_tag, str):
+        customer_id_tag = raw_tag.strip() or None
+    else:
+        customer_id_tag = None
+
+    # Validate it actually looks like a UUID before we hand it to asyncpg.
+    # A malformed tag should not poison the suppression table — fall through
+    # to a legacy (NULL customer_id) row and alert in logs.
+    import re as _re_uuid
+    _UUID_RE = _re_uuid.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+    if customer_id_tag and not _UUID_RE.match(customer_id_tag.lower()):
+        logger.warning(
+            "SES notification carried malformed customer_id tag",
+            extra={"customer_id_tag": customer_id_tag},
+        )
+        customer_id_tag = None
+
     if notification_type == "Bounce":
         bounce = inner.get("bounce", {})
         bounce_type = bounce.get("bounceType", "")
@@ -126,27 +151,54 @@ async def ses_webhook(request: Request):
     if not emails:
         return {"status": "ok", "suppressed": 0}
 
-    # --- Write to suppressed_addresses ---
+    # --- Write to suppressed_addresses (scoped per-customer when tag present) ---
+    # We can't use a single ON CONFLICT here because the unique constraint
+    # is split between two partial indexes (per-customer vs legacy NULL).
+    # Do an explicit upsert keyed on (customer_id, email).
     pool = get_pool()
     suppressed = 0
     async with pool.acquire() as conn:
         for email in emails:
             try:
-                await conn.execute(
-                    """
-                    INSERT INTO suppressed_addresses (email, reason, detail)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (email) DO UPDATE SET reason = EXCLUDED.reason,
-                        detail = EXCLUDED.detail, suppressed_at = NOW()
-                    """,
-                    email,
-                    reason,
-                    detail,
-                )
+                if customer_id_tag:
+                    await conn.execute(
+                        """
+                        INSERT INTO suppressed_addresses (email, reason, detail, customer_id)
+                        VALUES ($1, $2, $3, $4::uuid)
+                        ON CONFLICT (customer_id, email) WHERE customer_id IS NOT NULL
+                        DO UPDATE SET reason = EXCLUDED.reason,
+                                      detail = EXCLUDED.detail,
+                                      suppressed_at = NOW()
+                        """,
+                        email,
+                        reason,
+                        detail,
+                        customer_id_tag,
+                    )
+                else:
+                    # Legacy / untagged path — global suppression row.
+                    await conn.execute(
+                        """
+                        INSERT INTO suppressed_addresses (email, reason, detail, customer_id)
+                        VALUES ($1, $2, $3, NULL)
+                        ON CONFLICT (email) WHERE customer_id IS NULL
+                        DO UPDATE SET reason = EXCLUDED.reason,
+                                      detail = EXCLUDED.detail,
+                                      suppressed_at = NOW()
+                        """,
+                        email,
+                        reason,
+                        detail,
+                    )
                 suppressed += 1
                 logger.info(
                     "Address suppressed",
-                    extra={"email": email, "reason": reason, "detail": detail},
+                    extra={
+                        "email": email,
+                        "reason": reason,
+                        "detail": detail,
+                        "customer_id": customer_id_tag,
+                    },
                 )
             except Exception as exc:
                 logger.error(

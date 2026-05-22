@@ -6,12 +6,26 @@ POST   /rules           — create a new rule
 PUT    /rules/{rule_id} — update an existing rule
 DELETE /rules/{rule_id} — deactivate (soft-delete) a rule
 """
-import re
 from typing import Any, List, Optional
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+# google-re2 — RE2 has linear-time guarantees and is immune to ReDoS.
+# Falls back to the stdlib `re` module if google-re2 isn't installed so dev
+# checkouts don't break, but a startup warning makes it loud.
+try:
+    import re2 as _regex_engine  # type: ignore
+    _USING_RE2 = True
+except ImportError:  # pragma: no cover - dev fallback
+    import re as _regex_engine  # type: ignore
+    _USING_RE2 = False
+    import logging
+    logging.getLogger(__name__).warning(
+        "google-re2 not installed — falling back to stdlib `re`. "
+        "Customer regexes will NOT be ReDoS-safe. Install google-re2 in prod."
+    )
 
 from deps import get_current_customer, get_pool
 
@@ -20,19 +34,26 @@ router = APIRouter(prefix="/rules", tags=["rules"])
 VALID_MATCH_TYPES = {"string", "regex"}
 VALID_SCOPES = {"external", "internal", "both"}
 
+# Customer-controlled regex patterns are capped to keep the engine fast and
+# the storage column bounded.
+MAX_PATTERN_LEN = 1000
+MAX_NAME_LEN = 200
+MAX_DESCRIPTION_LEN = 2000
+MAX_EMAIL_LEN = 320  # RFC 5321 max
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
 class RuleBase(BaseModel):
-    name: Optional[str] = None
-    pattern: str
-    match_type: str
-    scope: str = "external"
-    applies_to_email: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=MAX_NAME_LEN)
+    pattern: str = Field(..., min_length=1, max_length=MAX_PATTERN_LEN)
+    match_type: str = Field(..., max_length=16)
+    scope: str = Field(default="external", max_length=16)
+    applies_to_email: Optional[str] = Field(default=None, max_length=MAX_EMAIL_LEN)
     is_exception: bool = False
-    description: Optional[str] = None
+    description: Optional[str] = Field(default=None, max_length=MAX_DESCRIPTION_LEN)
 
     @field_validator("match_type")
     @classmethod
@@ -48,27 +69,19 @@ class RuleBase(BaseModel):
             raise ValueError(f"scope must be one of {VALID_SCOPES}")
         return v
 
-    @field_validator("pattern")
-    @classmethod
-    def validate_pattern(cls, v: str, info) -> str:
-        return v
-
 
 class RuleCreate(RuleBase):
-    @field_validator("pattern")
-    @classmethod
-    def validate_regex_compiles(cls, v: str) -> str:
-        return v
+    pass
 
 
 class RuleUpdate(BaseModel):
-    name: Optional[str] = None
-    pattern: Optional[str] = None
-    match_type: Optional[str] = None
-    scope: Optional[str] = None
-    applies_to_email: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=MAX_NAME_LEN)
+    pattern: Optional[str] = Field(default=None, min_length=1, max_length=MAX_PATTERN_LEN)
+    match_type: Optional[str] = Field(default=None, max_length=16)
+    scope: Optional[str] = Field(default=None, max_length=16)
+    applies_to_email: Optional[str] = Field(default=None, max_length=MAX_EMAIL_LEN)
     is_exception: Optional[bool] = None
-    description: Optional[str] = None
+    description: Optional[str] = Field(default=None, max_length=MAX_DESCRIPTION_LEN)
     active: Optional[bool] = None
 
     @field_validator("match_type")
@@ -119,14 +132,15 @@ def _row_to_rule(row) -> RuleResponse:
 
 
 def _assert_valid_regex(pattern: str, match_type: str):
-    if match_type == "regex":
-        try:
-            re.compile(pattern)
-        except re.error as e:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Invalid regex pattern: {e}",
-            )
+    if match_type != "regex":
+        return
+    try:
+        _regex_engine.compile(pattern)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid regex pattern: {e}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +158,7 @@ async def list_rules(
             SELECT id, customer_id, name, pattern, match_type, scope,
                    applies_to_email, is_exception, active, description
             FROM rules
-            WHERE customer_id = $1
+            WHERE customer_id = $1 AND active = TRUE
             ORDER BY created_at ASC
             """,
             customer["id"],
@@ -236,10 +250,21 @@ async def delete_rule(
     customer: dict[str, Any] = Depends(get_current_customer),
     pool: asyncpg.Pool = Depends(get_pool),
 ):
+    """Soft-delete (deactivate) a rule.
+
+    We never hard-delete: rules remain referenced by `scan_logs.matched_rule_id`
+    for audit purposes (H9). 404 if the rule was already inactive — clients
+    should treat that as 'already gone'.
+    """
     async with pool.acquire() as conn:
         result = await conn.execute(
-            "DELETE FROM rules WHERE id = $1 AND customer_id = $2",
+            """
+            UPDATE rules
+               SET active = FALSE,
+                   updated_at = NOW()
+             WHERE id = $1 AND customer_id = $2 AND active = TRUE
+            """,
             rule_id, customer["id"],
         )
-    if result == "DELETE 0":
+    if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Rule not found")

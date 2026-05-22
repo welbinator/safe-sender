@@ -29,7 +29,7 @@ from typing import Optional
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from internal_auth import require_internal_secret
 
@@ -138,7 +138,8 @@ async def get_rules(domain: str):
     pool = get_pool()
     async with pool.acquire() as conn:
         customer = await conn.fetchrow(
-            "SELECT id, domain_verified FROM customers WHERE domain = $1", domain.lower()
+            "SELECT id, domain_verified, subject_hash_salt FROM customers WHERE domain = $1",
+            domain.lower(),
         )
         if not customer:
             raise HTTPException(status_code=404, detail="Domain not registered")
@@ -167,7 +168,15 @@ async def get_rules(domain: str):
         for r in rows
     ]
 
-    return {"customer_id": str(customer_id), "rules": rules_list}
+    # C12: hand the SMTP service this customer's HMAC key for subject hashing.
+    # Hex-encoded for clean JSON transport; SMTP decodes back to bytes.
+    salt_hex = bytes(customer["subject_hash_salt"]).hex()
+
+    return {
+        "customer_id": str(customer_id),
+        "rules": rules_list,
+        "subject_hash_salt": salt_hex,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -175,13 +184,13 @@ async def get_rules(domain: str):
 # ---------------------------------------------------------------------------
 
 class ScanLogRequest(BaseModel):
-    customer_id: str
-    sender: str
-    recipient: str
-    subject_hash: str          # SHA-256 hex digest — never plaintext
-    matched_rule_id: Optional[str] = None
-    outcome: str               # "allowed" or "blocked"
-    subject: str = ""          # TEMP: plaintext subject for testing — remove before go-live
+    customer_id: str = Field(..., max_length=64)
+    sender: str = Field(..., max_length=320)        # RFC 5321
+    recipient: str = Field(..., max_length=320)
+    subject_hash: str = Field(..., max_length=128)  # hex SHA-256
+    matched_rule_id: Optional[str] = Field(default=None, max_length=64)
+    outcome: str = Field(..., max_length=16)
+    subject: str = Field(default="", max_length=998)  # RFC 5322 line cap
 
     @field_validator("outcome")
     @classmethod
@@ -212,19 +221,35 @@ async def create_scan_log(body: ScanLogRequest):
         )
     return {"status": "logged"}
 
-
 # ---------------------------------------------------------------------------
-# GET /internal/suppressed/{email}
+# GET /internal/suppressed/{customer_id}/{email}
 # ---------------------------------------------------------------------------
+#
+# Sprint B C16: per-customer suppression isolation. A hard bounce on
+# alice@example.com for customer A must not block customer B from sending to
+# the same address. We treat legacy rows (customer_id IS NULL) as still global
+# until backfill completes, so existing suppressions don't quietly stop
+# working during rollout.
 
-@app.get("/internal/suppressed/{email}", dependencies=[Depends(require_internal_secret)])
-async def check_suppressed(email: str):
-    """Returns 200 if address is suppressed, 404 if not."""
+
+@app.get(
+    "/internal/suppressed/{customer_id}/{email}",
+    dependencies=[Depends(require_internal_secret)],
+)
+async def check_suppressed(customer_id: str, email: str):
+    """Returns 200 if address is suppressed for this customer, 404 if not."""
     pool = get_pool()
+    addr = email.lower().strip()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT email FROM suppressed_addresses WHERE email = $1",
-            email.lower().strip(),
+            """
+            SELECT email FROM suppressed_addresses
+            WHERE email = $1
+              AND (customer_id = $2::uuid OR customer_id IS NULL)
+            LIMIT 1
+            """,
+            addr,
+            customer_id,
         )
     if row:
         return {"suppressed": True}

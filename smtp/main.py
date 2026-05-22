@@ -19,14 +19,16 @@ import asyncio
 import collections
 import email as email_lib
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
 import os
-import re
+import re as _stdlib_re  # kept ONLY for non-customer code paths
 import ssl
 import sys
 import time
+import unicodedata
 from email import policy as email_policy
 
 import aiohttp
@@ -34,6 +36,92 @@ import boto3
 import requests
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
+
+# google-re2 — RE2 has linear-time guarantees and is immune to ReDoS.
+# Used for all customer-supplied regex patterns. Stdlib re is unsafe here
+# because a single malicious pattern can pin the worker forever (Sprint B C9/H2).
+try:
+    import re2 as _customer_re  # type: ignore
+    _USING_RE2 = True
+except ImportError:  # pragma: no cover - dev fallback
+    _customer_re = _stdlib_re  # type: ignore
+    _USING_RE2 = False
+
+# Defensive cap (backend enforces too).
+MAX_PATTERN_LEN = 1000
+# Even RE2 is linear in input size; cap the input we feed to it so a
+# multi-megabyte body × many rules can't burn CPU.
+MAX_REGEX_INPUT_LEN = 65536
+
+
+# ---------------------------------------------------------------------------
+# Subject normalization + HMAC hashing (Sprint B C12, C15)
+# ---------------------------------------------------------------------------
+#
+# C15: subjects are normalized server-side so customers can't dodge logging
+#   by inserting zero-width joiners, RTL marks, or stray control characters.
+#   Normalization is NFKC + strip bidi/format/control chars + collapse
+#   whitespace + lowercase. The result is what gets hashed.
+#
+# C12: hashing is HMAC-SHA-256 with a per-customer salt fetched from the
+#   backend. This means the same subject for two different customers produces
+#   two different hashes, so an attacker who dumps scan_logs can't rainbow
+#   the whole table against a single dictionary of common subjects.
+
+# Codepoint categories Unicode flags as "Cf" (format), "Cc" (control) etc.
+# We strip Cf and Cc (except tab/newline/space which we then collapse).
+_KEEP_CONTROL = {"\t", "\n", " "}
+
+
+def _normalize_subject(subject: str) -> str:
+    """Canonicalize a subject for stable hashing.
+
+    Steps:
+      1. NFKC unicode normalization (collapses compatibility forms).
+      2. Strip format (Cf) codepoints — zero-width joiners, BOM, RLE/LRE,
+         LRI/RLI/FSI/PDI, etc. These are pure-display tricks attackers use
+         to make two human-equal subjects hash differently.
+      3. Strip control (Cc) codepoints except tab/newline/space.
+      4. Collapse runs of whitespace, casefold, trim.
+    """
+    if not subject:
+        return ""
+    nfkc = unicodedata.normalize("NFKC", subject)
+    cleaned_chars = []
+    for ch in nfkc:
+        cat = unicodedata.category(ch)
+        if cat == "Cf":  # format
+            continue
+        if cat == "Cc" and ch not in _KEEP_CONTROL:
+            continue
+        cleaned_chars.append(ch)
+    cleaned = "".join(cleaned_chars)
+    # Collapse any run of whitespace to a single space.
+    collapsed = _stdlib_re.sub(r"\s+", " ", cleaned).strip()
+    return collapsed.casefold()
+
+
+def _hash_subject(subject: str, salt: bytes) -> str:
+    """Return hex HMAC-SHA-256 of the normalized subject."""
+    normalized = _normalize_subject(subject)
+    return hmac.new(salt, normalized.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _decode_salt(hex_salt: str | None) -> bytes:
+    """Decode the hex-encoded HMAC salt returned by the backend.
+
+    Fail closed: if the backend didn't return a salt (legacy code path,
+    rolling deploy, etc.) we use the all-zero salt rather than crash.
+    Hashes computed this way are still unique per subject but lose the
+    cross-customer privacy property until the backend catches up.
+    """
+    if not hex_salt:
+        return b"\x00" * 32
+    try:
+        return bytes.fromhex(hex_salt)
+    except ValueError:
+        logger.warning("subject_hash_salt was not valid hex; using zero salt")
+        return b"\x00" * 32
 
 # ---------------------------------------------------------------------------
 # Structured JSON logger
@@ -245,11 +333,22 @@ def _rule_matches(rule: dict, subject: str, body: str) -> bool:
             if pattern.lower() in text.lower():
                 return True
         elif match_type == "regex":
+            if len(pattern) > MAX_PATTERN_LEN:
+                logger.warning(
+                    "Rejecting oversized regex pattern",
+                    extra={"len": len(pattern), "rule_id": rule.get("id")},
+                )
+                continue
+            text_to_scan = text[:MAX_REGEX_INPUT_LEN]
             try:
-                if re.search(pattern, text, re.IGNORECASE):
+                if _customer_re.search(pattern, text_to_scan, _customer_re.IGNORECASE):
                     return True
-            except re.error as exc:
-                logger.warning("Invalid regex pattern", extra={"pattern": pattern, "error": str(exc)})
+            except Exception as exc:
+                # Catch broadly — re2 raises its own error type, not re.error.
+                logger.warning(
+                    "Invalid regex pattern",
+                    extra={"pattern": pattern, "error": str(exc)},
+                )
     return False
 
 
@@ -267,9 +366,14 @@ async def _fetch_rules(domain: str) -> dict | None:
             return await resp.json()
 
 
-async def _is_suppressed(recipient: str) -> bool:
-    """Check if a recipient address is in the suppression list."""
-    url = f"{BACKEND_URL}/internal/suppressed/{recipient.lower().strip('<>')}"
+async def _is_suppressed(customer_id: str, recipient: str) -> bool:
+    """Check if a recipient address is suppressed for this customer.
+
+    Sprint B C16: scoped per-customer. Backend also returns suppressed=True
+    for legacy unscoped rows (customer_id IS NULL) until backfill completes.
+    """
+    addr = recipient.lower().strip("<>")
+    url = f"{BACKEND_URL}/internal/suppressed/{customer_id}/{addr}"
     try:
         async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS) as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
@@ -311,8 +415,18 @@ async def _log_scan(
         logger.error("Failed to post scan log", extra={"error": str(exc)})
 
 
-def _forward_via_ses(raw_message: bytes, mail_from: str, rcpt_tos: list[str]) -> None:
-    """Send raw email via AWS SES (synchronous boto3 call)."""
+def _forward_via_ses(
+    raw_message: bytes,
+    mail_from: str,
+    rcpt_tos: list[str],
+    customer_id: str | None = None,
+) -> None:
+    """Send raw email via AWS SES (synchronous boto3 call).
+
+    Sprint B C16: we tag every send with the originating customer_id so SES
+    bounce/complaint notifications carry it back to the webhook handler, which
+    scopes suppression entries to that customer.
+    """
     client = boto3.client(
         "ses",
         region_name=AWS_REGION,
@@ -326,6 +440,9 @@ def _forward_via_ses(raw_message: bytes, mail_from: str, rcpt_tos: list[str]) ->
     }
     if SES_SOURCE_ARN:
         kwargs["SourceArn"] = SES_SOURCE_ARN
+    if customer_id:
+        # SES Tags: ASCII, [A-Za-z0-9_-] only, ≤256 chars. UUIDs satisfy this.
+        kwargs["Tags"] = [{"Name": "customer_id", "Value": str(customer_id)}]
     client.send_raw_email(**kwargs)
 
 
@@ -455,7 +572,8 @@ class SafeSenderHandler:
             if data:
                 recipient = rcpt_tos[0] if rcpt_tos else ""
                 msg = email_lib.message_from_bytes(raw_content, policy=email_policy.default)
-                subject_hash = hashlib.sha256(str(msg.get("Subject", "")).encode()).hexdigest()
+                _salt = _decode_salt(data.get("subject_hash_salt"))
+                subject_hash = _hash_subject(str(msg.get("Subject", "")), _salt)
                 await _log_scan(
                     customer_id=data["customer_id"],
                     sender=mail_from,
@@ -485,6 +603,7 @@ class SafeSenderHandler:
 
         customer_id: str = data["customer_id"]
         rules: list[dict] = data.get("rules", [])
+        subject_hash_salt: bytes = _decode_salt(data.get("subject_hash_salt"))
 
         # --- 2. Rate limiting ---
         if not _rate_limiter.is_allowed(customer_id):
@@ -508,7 +627,7 @@ class SafeSenderHandler:
         msg = email_lib.message_from_bytes(raw_content, policy=email_policy.default)
         subject: str = str(msg.get("Subject", ""))
         body: str = _get_text_body(msg)
-        subject_hash: str = hashlib.sha256(subject.encode()).hexdigest()
+        subject_hash: str = _hash_subject(subject, subject_hash_salt)
 
         # --- 4. Evaluate rules ---
         normal_rules = [r for r in rules if not r.get("is_exception", False)]
@@ -557,7 +676,7 @@ class SafeSenderHandler:
         # Forward via SES
         # --- Suppression check ---
         for rcpt in rcpt_tos:
-            if await _is_suppressed(rcpt):
+            if await _is_suppressed(customer_id, rcpt):
                 logger.info("Suppressed recipient — email blocked", extra={"recipient": rcpt, "from": mail_from})
                 await _log_scan(
                     customer_id=customer_id,
@@ -572,7 +691,9 @@ class SafeSenderHandler:
 
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _forward_via_ses, raw_content, mail_from, rcpt_tos)
+            await loop.run_in_executor(
+                None, _forward_via_ses, raw_content, mail_from, rcpt_tos, customer_id
+            )
             logger.info("Email forwarded via SES", extra={"from": mail_from})
         except Exception as exc:
             logger.error("SES send failed", extra={"error": str(exc), "from": mail_from})

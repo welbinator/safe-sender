@@ -4,7 +4,14 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React</title>
+    <title>Sender Safety</title>
+    <!--
+      Sprint B C14: Google Identity Services loaded statically here, NOT
+      injected from JS. CSP forbids inline/eval; only declared origins on
+      script-src can load. Keeping the tag in HTML lets the browser fetch
+      it during initial document parse — faster + auditable.
+    -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
   </head>
   <body>
     <div id="root"></div>
