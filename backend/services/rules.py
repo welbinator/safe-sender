@@ -7,13 +7,21 @@ loud warning.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 from repositories.rules import RuleRepository
 
-from .errors import InvalidRegexPattern, NotFoundError
+from .errors import InvalidRegexPattern, NotFoundError, TooManyRules
 
 _log = logging.getLogger(__name__)
+
+# F-52 — Per-customer active-rule cap. Override via env for enterprise tiers.
+# 500 is generous for SMB usage (typical customers have <50) while still
+# bounding worst-case per-message regex evaluation cost.
+MAX_ACTIVE_RULES_PER_CUSTOMER = int(
+    os.environ.get("MAX_ACTIVE_RULES_PER_CUSTOMER", "500")
+)
 
 # google-re2 — RE2 has linear-time guarantees and is immune to ReDoS.
 try:
@@ -77,6 +85,14 @@ class RuleService:
         description: Optional[str],
     ) -> dict[str, Any]:
         self.assert_valid_regex(pattern, match_type)
+        # F-52 — cap *active* rules per customer. Soft-deleted rows don't count,
+        # so customers can prune-and-replace without artificial friction.
+        active = await self.rules.count_active_for_customer(customer_id)
+        if active >= MAX_ACTIVE_RULES_PER_CUSTOMER:
+            raise TooManyRules(
+                f"Active rule limit reached ({MAX_ACTIVE_RULES_PER_CUSTOMER}). "
+                "Delete unused rules or contact support to raise the limit."
+            )
         return await self.rules.create(
             customer_id=customer_id,
             name=name,
@@ -112,6 +128,17 @@ class RuleService:
             match_type if match_type is not None else existing["match_type"]
         )
         self.assert_valid_regex(effective_pattern, effective_match_type)
+
+        # F-52 — re-activating a previously-disabled rule also counts toward
+        # the cap. We only check on the False→True transition to avoid an
+        # unnecessary query on the (much more common) edit-without-toggle case.
+        if active is True and existing.get("active") is False:
+            count = await self.rules.count_active_for_customer(customer_id)
+            if count >= MAX_ACTIVE_RULES_PER_CUSTOMER:
+                raise TooManyRules(
+                    f"Active rule limit reached ({MAX_ACTIVE_RULES_PER_CUSTOMER}). "
+                    "Delete unused rules or contact support to raise the limit."
+                )
 
         row = await self.rules.update(
             rule_id=rule_id,

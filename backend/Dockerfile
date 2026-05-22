@@ -2,8 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# F-53 — install from the hash-pinned lockfile, not the loose requirements
+# file. `--require-hashes` is implicit when every line in the input has a
+# hash, and it fails the build if a mirror returns a tampered wheel.
+COPY requirements.txt requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY . .
 

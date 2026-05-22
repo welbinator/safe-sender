@@ -882,7 +882,40 @@ if __name__ == "__main__":
     )
 
     try:
-        asyncio.get_event_loop().run_forever()
+        # ------------------------------------------------------------------
+        # F-50 — Tiny health endpoint on loopback:9100. The orchestrator (or a
+        # docker healthcheck) can hit GET /health and get a 200 if both SMTP
+        # controllers are running. Not reachable from outside the container
+        # (binds 127.0.0.1) and not behind the firewall on 25/587.
+        # ------------------------------------------------------------------
+        from aiohttp import web
+
+        async def _health(_req):
+            ok = bool(getattr(controller587, "server", None)) and bool(
+                getattr(controller25, "server", None)
+            )
+            status = 200 if ok else 503
+            return web.json_response(
+                {
+                    "status": "ok" if ok else "degraded",
+                    "smtp_587": bool(getattr(controller587, "server", None)),
+                    "smtp_25": bool(getattr(controller25, "server", None)),
+                },
+                status=status,
+            )
+
+        async def _start_health():
+            app = web.Application()
+            app.router.add_get("/health", _health)
+            runner = web.AppRunner(app, access_log=None)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 9100)
+            await site.start()
+            logger.info("SMTP health endpoint listening on 127.0.0.1:9100/health")
+
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(_start_health())
+        loop.run_forever()
     except KeyboardInterrupt:
         controller587.stop()
         controller25.stop()

@@ -14,6 +14,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # F-51 — resource caps (single-host compose, not swarm).
+    # Hetzner CX21 has 2GB / 2 vCPU; budget conservatively. Sum across
+    # services ≈ 1.7GB to leave ~300MB for kernel + cron + sshd.
+    mem_limit: 640m
+    mem_reservation: 256m
+    cpus: 0.75
 
   backend:
     build: ./backend
@@ -38,6 +44,16 @@ services:
       SES_FROM_EMAIL: ${SES_FROM_EMAIL:-noreply@sendersafety.com}
       ADMIN_SECRET: ${ADMIN_SECRET:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+    # F-51 — backend is the largest memory user (asyncpg pool + RE2 buffers).
+    mem_limit: 640m
+    mem_reservation: 256m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   smtp:
     build: ./smtp
@@ -63,6 +79,17 @@ services:
       AUTH_PASSWORD: ${SMTP_AUTH_PASSWORD:-}
       TLS_CERT_PATH: ${TLS_CERT_PATH:-/etc/letsencrypt/live/smtp.sendersafety.com/fullchain.pem}
       TLS_KEY_PATH: ${TLS_KEY_PATH:-/etc/letsencrypt/live/smtp.sendersafety.com/privkey.pem}
+    # F-51 — SMTP is mostly idle between bursts.
+    mem_limit: 384m
+    mem_reservation: 96m
+    cpus: 0.75
+    # F-50 — orchestrator/healthcheck target on loopback:9100.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/health', timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   nginx:
     build:
@@ -78,6 +105,10 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - backend
+    # F-51 — nginx is light; small cap is fine.
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpus: 0.5
 
 volumes:
   postgres_data:

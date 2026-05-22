@@ -22,6 +22,7 @@ from .errors import (
     InvalidRegexPattern,
     NotFoundError,
     ServiceError,
+    TooManyRules,
 )
 from .admin import AdminService
 from .auth import AuthService, LoginResult
@@ -48,4 +49,5 @@ __all__ = [
     "InvalidRegexPattern",
     "DomainAlreadyVerified",
     "DomainVerificationNotInitialized",
+    "TooManyRules",
 ]

@@ -89,6 +89,19 @@ def test_health(client):
     assert resp.json()["status"] == "ok"
 
 
+def test_metrics_endpoint_exposes_prometheus_text(client):
+    """F-45 — /metrics returns Prometheus text format and includes
+    http_requests_total once any traffic has hit the app."""
+    # Hit /health first to ensure at least one labeled request is recorded.
+    client.get("/health")
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    body = resp.text
+    # Default Instrumentator metric names
+    assert "http_requests_total" in body or "http_request_duration" in body
+
+
 # ---------------------------------------------------------------------------
 # Auth tests
 # ---------------------------------------------------------------------------

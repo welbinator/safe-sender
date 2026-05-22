@@ -27,6 +27,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time as _time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -81,6 +82,87 @@ from db import close_pool, get_pool, set_pool
 
 app = FastAPI(title="Sender Safety API", version="0.3.0")
 app.add_middleware(RequestIdMiddleware)
+
+# ---------------------------------------------------------------------------
+# F-45 — Prometheus instrumentation.
+# We use prometheus_client directly rather than prometheus-fastapi-
+# instrumentator because that wrapper caps starlette<1.0.0, and starlette
+# 0.52.x has PYSEC-2026-161. Direct exposition is small and gives us the same
+# three signals (request count, latency, in-progress) plus full control.
+#
+# Nothing in nginx.conf forwards /metrics, so the endpoint is reachable only
+# from inside the Docker network (scraped by a sidecar / Prometheus container,
+# not the public internet).
+# ---------------------------------------------------------------------------
+from prometheus_client import (  # noqa: E402
+    CONTENT_TYPE_LATEST,
+    REGISTRY,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
+from starlette.requests import Request as _PromRequest  # noqa: E402
+from starlette.responses import Response as _PromResponse  # noqa: E402
+
+
+def _get_or_create(metric_cls, name, *args, **kwargs):
+    """Return existing metric on re-import (tests reload `main`) instead of
+    raising ``Duplicated timeseries in CollectorRegistry``.
+    """
+    existing = REGISTRY._names_to_collectors.get(name)
+    if existing is not None:
+        return existing
+    return metric_cls(name, *args, **kwargs)
+
+
+_PROM_REQUESTS = _get_or_create(
+    Counter,
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "handler", "status"],
+)
+_PROM_LATENCY = _get_or_create(
+    Histogram,
+    "http_request_duration_seconds",
+    "HTTP request latency in seconds",
+    ["method", "handler"],
+)
+_PROM_INPROGRESS = _get_or_create(
+    Gauge,
+    "http_requests_in_progress",
+    "HTTP requests currently being processed",
+    ["method", "handler"],
+)
+_PROM_EXCLUDED = {"/health", "/healthz", "/metrics"}
+
+
+@app.middleware("http")
+async def _prometheus_middleware(request: _PromRequest, call_next):
+    path = request.url.path
+    if path in _PROM_EXCLUDED:
+        return await call_next(request)
+    # Use the matched route template ("/rules/{id}") rather than the raw path
+    # so high-cardinality URLs don't explode the metric series.
+    route = request.scope.get("route")
+    handler = getattr(route, "path", path) if route else path
+    method = request.method
+    _PROM_INPROGRESS.labels(method, handler).inc()
+    start = _time.perf_counter()
+    status = "500"
+    try:
+        response = await call_next(request)
+        status = str(response.status_code)
+        return response
+    finally:
+        _PROM_LATENCY.labels(method, handler).observe(_time.perf_counter() - start)
+        _PROM_REQUESTS.labels(method, handler, status).inc()
+        _PROM_INPROGRESS.labels(method, handler).dec()
+
+
+@app.get("/metrics", include_in_schema=False)
+async def _metrics() -> _PromResponse:
+    return _PromResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 # ---------------------------------------------------------------------------
 # Database connection pool (created on startup; lives in db.py — F-13)
 # ---------------------------------------------------------------------------
@@ -156,21 +238,45 @@ app.include_router(admin.router)
 
 @app.get("/health")
 async def health() -> dict:
-    """Liveness + DB readiness probe (F-47).
+    """Liveness + DB readiness probe (F-47, F-46).
 
-    A 200 here means the process is up AND can round-trip a query to Postgres.
-    A pure liveness check (always-200) misled the loadbalancer during DB
-    outages — requests landed on backends that immediately 500'd. Now if PG
-    is unreachable we return 503 and the proxy can route around us.
+    A 200 here means the process is up AND can round-trip a query to Postgres
+    within 1 second. A pure liveness check (always-200) misled the loadbalancer
+    during DB outages — requests landed on backends that immediately 500'd. Now
+    if PG is unreachable, or the asyncpg pool is fully saturated (every conn
+    busy + every waiter timing out), we return 503 and the proxy can route
+    around us. Pool stats are echoed so Prometheus / `/metrics` consumers can
+    alert on chronic saturation before it tips over.
     """
     try:
         pool = get_pool()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
+        # F-46: acquire with a hard 1s timeout. If the pool is exhausted long
+        # enough that we can't even get a connection inside a second, that's a
+        # saturation signal and we want the LB to shed load, not queue it.
+        async with asyncio.timeout(1):
+            async with pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        logger.warning(
+            "health: pool exhausted (size=%s free=%s): %s",
+            pool.get_size() if "pool" in locals() else "?",
+            pool.get_idle_size() if "pool" in locals() else "?",
+            exc,
+        )
+        raise HTTPException(status_code=503, detail="pool_exhausted")
     except Exception as exc:
         logger.warning("health: DB ping failed: %s", exc)
         raise HTTPException(status_code=503, detail="db_unavailable")
-    return {"status": "ok", "db": "ok"}
+    return {
+        "status": "ok",
+        "db": "ok",
+        "pool": {
+            "size": pool.get_size(),
+            "idle": pool.get_idle_size(),
+            "max": pool.get_max_size(),
+            "min": pool.get_min_size(),
+        },
+    }
 
 
 @app.get("/healthz")

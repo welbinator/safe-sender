@@ -46,6 +46,13 @@ class RuleRepository(BaseRepository):
         )
         return _as_dict(row)
 
+    async def count_active_for_customer(self, customer_id: Any) -> int:
+        """F-52 — used to enforce the per-customer active-rule cap."""
+        return await self.conn.fetchval(
+            "SELECT COUNT(*) FROM rules WHERE customer_id = $1 AND active = TRUE",
+            customer_id,
+        ) or 0
+
     # --- writes ---------------------------------------------------------
 
     async def create(
