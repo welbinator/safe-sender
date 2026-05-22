@@ -44,6 +44,12 @@ def run_migrations_offline() -> None:
         url=_sync_db_url(),
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        # F-22: each migration gets its own transaction. If migration N
+        # fails, migrations 1..N-1 stay committed, so fix-forward is
+        # straightforward. The previous default wrapped the entire chain
+        # in one transaction — a single bad migration rolled back all
+        # successful ones, which is the wrong tradeoff on prod.
+        transaction_per_migration=True,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -54,7 +60,10 @@ def run_migrations_online() -> None:
     cfg["sqlalchemy.url"] = _sync_db_url()
     engine = engine_from_config(cfg, prefix="sqlalchemy.", poolclass=pool.NullPool)
     with engine.connect() as connection:
-        context.configure(connection=connection)
+        context.configure(
+            connection=connection,
+            transaction_per_migration=True,  # F-22 — see offline branch.
+        )
         with context.begin_transaction():
             context.run_migrations()
 
