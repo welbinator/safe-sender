@@ -71,6 +71,7 @@ jobs:
           PGPASSWORD=regen pg_dump -h localhost -U postgres -d regen \
             --schema-only --no-owner --no-privileges --no-comments \
             | grep -v '^--' \
+            | grep -Ev '^\\(unrestrict|restrict)\b' \
             | awk 'BEGIN{skip=0} /CREATE TABLE.*alembic_version/{skip=1} skip && /^$/{skip=0; next} !skip' \
             > /tmp/schema.generated.sql
       - name: Upload generated schema (artifact)

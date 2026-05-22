@@ -27,7 +27,10 @@ depends_on = None
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 _LEGACY_FILES = [
-    _BACKEND_ROOT / "db" / "schema.sql",
+    # NOTE: legacy_bootstrap.sql is the hand-written IF-NOT-EXISTS DDL that
+    # predates Alembic. db/schema.sql is a pg_dump artifact (CI drift check
+    # only) and MUST NOT be replayed here — it would clash on alembic_version.
+    _BACKEND_ROOT / "db" / "legacy_bootstrap.sql",
     *sorted((_BACKEND_ROOT / "migrations").glob("*.sql")),
 ]
 

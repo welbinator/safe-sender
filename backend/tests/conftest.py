@@ -114,7 +114,10 @@ def _pg_server():
 
     # Apply schema + migrations in order.
     repo_root = Path(__file__).resolve().parents[1]  # backend/
-    schema = repo_root / "db" / "schema.sql"
+    # legacy_bootstrap.sql = hand-written IF-NOT-EXISTS DDL replayable via psql.
+    # db/schema.sql is a pg_dump artifact (CI drift baseline) — NOT replayable
+    # here because it doesn't use IF NOT EXISTS and would clash on re-apply.
+    schema = repo_root / "db" / "legacy_bootstrap.sql"
     migrations_dir = repo_root / "migrations"
     psql_db = [
         str(pgbin / "psql"), "-h", "127.0.0.1", "-p", str(port),
