@@ -7,7 +7,7 @@ Sprint C1 hotfix (audit C-4):
   - Optional IP allowlist via ADMIN_IP_ALLOWLIST (comma-separated CIDRs/IPs).
   - admin_audit_log: every authenticated admin action writes one row
     (ip, method, path, status, optional detail).
-  - Per-IP rate limit (in-process token bucket): default 30 req/min per IP.
+  - Per-IP rate limit (Postgres-backed sliding window, F-19): default 30 req/min per IP.
 
 Sprint C1 t7: data access moved into AdminService + AdminAuditRepository.
 Router keeps the auth/allowlist/rate-limit dependency (security primitive) and
@@ -26,9 +26,7 @@ import hmac
 import ipaddress
 import logging
 import os
-import time
-from collections import deque
-from threading import Lock
+import random
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -100,22 +98,27 @@ def _ip_allowed(ip: str) -> bool:
     return any(addr in net for net in _ADMIN_ALLOWLIST)
 
 
-# ── Per-IP rate limiter (in-process; sufficient for the single-replica admin
-# panel — if we ever scale we'll move it into Postgres). ─────────────────────
-_rate_lock = Lock()
-_rate_buckets: "dict[str, deque]" = {}
-
-
-def _check_rate_limit(ip: str) -> bool:
-    now = time.monotonic()
-    window = 60.0
-    with _rate_lock:
-        bucket = _rate_buckets.setdefault(ip, deque())
-        while bucket and now - bucket[0] > window:
-            bucket.popleft()
-        if len(bucket) >= _RATE_LIMIT_PER_MIN:
-            return False
-        bucket.append(now)
+# ── Per-IP rate limiter — Postgres-backed sliding window (F-19) ──────────────
+# The previous in-process limiter died on every container restart and was
+# bypassed entirely by horizontal scale-out. Each call goes to AdminRateLimit
+# Repository which does a single atomic UPSERT + RETURNING.
+async def _check_rate_limit(ip: str) -> bool:
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            from repositories import AdminRateLimitRepository
+            limiter = AdminRateLimitRepository(conn)
+            ok = await limiter.hit(ip, _RATE_LIMIT_PER_MIN)
+            # Opportunistic GC: 1% of requests purge stale windows.
+            if random.random() < 0.01:
+                await limiter.purge_expired()
+            return ok
+    except Exception:
+        # Fail-open on DB error — the alternative is locking out the admin
+        # panel during an outage, which makes recovery harder. Audit log
+        # records the rate-limit-skipped path implicitly (the admin call
+        # itself is logged).
+        logger.exception("admin: rate limiter DB call failed; allowing request")
         return True
 
 
@@ -174,7 +177,7 @@ async def _require_admin(
         )
         raise HTTPException(status_code=403, detail="IP not allowed")
 
-    if not _check_rate_limit(ip):
+    if not await _check_rate_limit(ip):
         await _audit_from_dependency(
             ip, request.method, request.url.path, 429,
             {"reason": "rate_limited"},

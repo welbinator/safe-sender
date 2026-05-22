@@ -391,10 +391,21 @@ class TestAdminPanel:
         assert resp.json()["detail"] == "IP not allowed"
 
     def test_admin_rate_limit(self, client, monkeypatch):
+        """F-19: limiter is now Postgres-backed.
+
+        We monkey-patch ``_check_rate_limit`` directly to assert that the
+        admin router returns 429 when it returns False. End-to-end
+        behaviour against real Postgres is covered by integration tests.
+        """
         from routers import admin as admin_mod
-        with admin_mod._rate_lock:
-            admin_mod._rate_buckets.clear()
-        monkeypatch.setattr(admin_mod, "_RATE_LIMIT_PER_MIN", 3)
+
+        calls = {"n": 0}
+
+        async def fake_limit(ip: str) -> bool:
+            calls["n"] += 1
+            return calls["n"] <= 3
+
+        monkeypatch.setattr(admin_mod, "_check_rate_limit", fake_limit)
         client.cookies.clear()
         h = self._admin_headers()
         codes = [client.get("/admin/stats", headers=h).status_code for _ in range(4)]

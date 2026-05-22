@@ -31,6 +31,60 @@ jobs:
         # H-1: NO `|| true`. Test failures must fail the build.
         run: pytest tests/ --tb=short
 
+  schema-drift:
+    name: Schema Drift Check
+    # F-24: regenerate db/schema.sql from `alembic upgrade head` against a
+    # throwaway Postgres and fail CI if it differs from the checked-in copy.
+    # Prevents the schema.sql / migrations skew that produced the prod
+    # bootstrap pain documented in F-23.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: regen
+          POSTGRES_DB: regen
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Install postgres client tools
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run alembic + dump schema
+        env:
+          DATABASE_URL: postgresql://postgres:regen@localhost:5432/regen
+        run: |
+          alembic upgrade head
+          PGPASSWORD=regen pg_dump -h localhost -U postgres -d regen \
+            --schema-only --no-owner --no-privileges --no-comments \
+            | grep -v '^--' \
+            | awk 'BEGIN{skip=0} /CREATE TABLE.*alembic_version/{skip=1} skip && /^$/{skip=0; next} !skip' \
+            > /tmp/schema.generated.sql
+      - name: Upload generated schema (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema.generated.sql
+          path: /tmp/schema.generated.sql
+      - name: Diff against checked-in schema.sql
+        run: |
+          if ! diff -u db/schema.sql /tmp/schema.generated.sql; then
+            echo "::error::db/schema.sql is out of date. Run backend/scripts/regen_schema_sql.sh and commit."
+            exit 1
+          fi
+
   test-smtp:
     name: Test SMTP
     runs-on: ubuntu-latest
