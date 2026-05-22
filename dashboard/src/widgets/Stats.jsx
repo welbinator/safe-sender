@@ -8,8 +8,11 @@ export default function Stats() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    // Derive stats from logs endpoint (today's date range)
-    const today = new Date().toISOString().split('T')[0];
+    // Derive stats from logs endpoint (today's date range, LOCAL time — not UTC,
+    // otherwise users west of UTC see "0" after their local midnight has passed
+    // but before UTC midnight, and miss scans done late evening local time).
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     api.get('/logs', { params: { date_from: today, limit: 500 } })
       .then(r => {
         const logs = r.data.results || [];
