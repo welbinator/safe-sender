@@ -292,3 +292,42 @@ class TestLogs:
             headers=auth_headers(fake_customer["token"]),
         )
         assert resp.status_code == 422
+
+
+class TestCsrfProtection:
+    """Sprint C1 hotfix (audit C-3): cookie-authenticated mutations must
+    carry the X-Requested-With: sender-safety header. Bearer-auth bypasses."""
+
+    def test_cookie_mutation_without_csrf_header_is_rejected(self, client):
+        info = register_customer(client)
+        client.cookies.set("session", info["token"])
+        resp = client.post("/rules", json={
+            "pattern": "test", "match_type": "string", "action": "block",
+        })
+        assert resp.status_code == 403, resp.text
+        assert "CSRF" in resp.json()["detail"]
+
+    def test_cookie_mutation_with_csrf_header_succeeds(self, client):
+        info = register_customer(client)
+        client.cookies.set("session", info["token"])
+        resp = client.post(
+            "/rules",
+            json={"pattern": "ok", "match_type": "string", "action": "block"},
+            headers={"X-Requested-With": "sender-safety"},
+        )
+        assert resp.status_code in (200, 201), resp.text
+
+    def test_cookie_GET_does_not_require_csrf_header(self, client):
+        info = register_customer(client)
+        client.cookies.set("session", info["token"])
+        resp = client.get("/customers/me")
+        assert resp.status_code == 200, resp.text
+
+    def test_bearer_mutation_without_csrf_header_succeeds(self, client, fake_customer):
+        client.cookies.clear()
+        resp = client.post(
+            "/rules",
+            json={"pattern": "bearerok", "match_type": "string", "action": "block"},
+            headers=auth_headers(fake_customer["token"]),
+        )
+        assert resp.status_code in (200, 201), resp.text
