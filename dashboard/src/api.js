@@ -2,10 +2,44 @@ import axios from 'axios';
 
 const BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
-// Sprint B C13: cookies for auth. `withCredentials: true` makes the browser
-// send the HttpOnly `session` cookie on every request. We no longer touch
-// localStorage — XSS can no longer steal the JWT.
-const api = axios.create({ baseURL: BASE_URL, withCredentials: true });
+// F-59 — per-endpoint credentials, not global.
+//
+// Previously `withCredentials: true` was set on the shared axios instance,
+// which meant ANY URL passed through this instance (a misrouted call, a
+// future third-party hit) would attach the session+CSRF cookies. The fix:
+//
+//   1. Instance default is `withCredentials: false`.
+//   2. A request interceptor flips it ON *only* when the resolved URL
+//      targets our own backend (relative path, or absolute URL whose
+//      origin matches BASE_URL's origin / the current page origin).
+//   3. Same-origin SPA -> /api/* always qualifies. Cross-origin /api on a
+//      separate host qualifies via the BASE_URL origin check. A typo or
+//      future absolute URL to `https://3rdparty.example/...` will NOT
+//      receive cookies, even if accidentally routed through `api`.
+//
+// This is "default deny, opt in per scope" for credentials.
+const api = axios.create({ baseURL: BASE_URL, withCredentials: false });
+
+// Resolve BASE_URL to an absolute origin once. If BASE_URL is relative
+// (the common case: '/api'), the backend origin === the page origin.
+const BACKEND_ORIGIN = (() => {
+  try {
+    return new URL(BASE_URL, window.location.origin).origin;
+  } catch {
+    return window.location.origin;
+  }
+})();
+
+function isSameBackend(url) {
+  if (!url) return true; // axios defaults to BASE_URL → trusted
+  try {
+    const resolved = new URL(url, BACKEND_ORIGIN);
+    return resolved.origin === BACKEND_ORIGIN;
+  } catch {
+    // Couldn't parse — assume relative → trusted.
+    return true;
+  }
+}
 
 // Sprint C3 F-11: double-submit-cookie CSRF. The backend sets a non-HttpOnly
 // `csrf_token` cookie at login (256-bit random). We read it here and mirror
@@ -26,9 +60,18 @@ function readCookie(name) {
 
 api.interceptors.request.use((config) => {
   config.headers = config.headers || {};
-  const csrf = readCookie('csrf_token');
-  if (csrf) {
-    config.headers['X-CSRF-Token'] = csrf;
+  // F-59: opt in to credentials only for our backend.
+  if (isSameBackend(config.url)) {
+    config.withCredentials = true;
+    const csrf = readCookie('csrf_token');
+    if (csrf) {
+      config.headers['X-CSRF-Token'] = csrf;
+    }
+  } else {
+    // Belt-and-suspenders: even if a future caller passes a third-party
+    // URL through this instance, no cookies, no CSRF header.
+    config.withCredentials = false;
+    delete config.headers['X-CSRF-Token'];
   }
   return config;
 });
