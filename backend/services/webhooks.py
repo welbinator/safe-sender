@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
 from typing import Any, Optional
+
+from pydantic import BaseModel
 
 from repositories import SuppressionRepository
 from services._webhook_helpers import emails_and_reason, extract_customer_id_tag
@@ -24,9 +25,12 @@ from services._webhook_helpers import emails_and_reason, extract_customer_id_tag
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ProcessResult:
-    """What the router should return to SNS."""
+class ProcessResult(BaseModel):
+    """What the router should return to SNS.
+
+    F-35: pydantic so the router can `return result` instead of unpacking
+    by hand — same model class at the service ↔ router boundary.
+    """
     status: str
     suppressed: int = 0
     detail: Optional[str] = None  # human-readable extra (e.g. ignored type)

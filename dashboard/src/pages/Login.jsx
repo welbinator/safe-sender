@@ -35,8 +35,10 @@ export default function Login() {
     const onCredential = async ({ credential }) => {
       try {
         const res = await authGoogle(credential);
-        // Cookie is already set by the server. We just commit the customer.
-        login({ id: res.data.customer_id, email: res.data.email });
+        // Cookie is already set by the server. F-43: refetch /customers/me
+        // instead of trusting the response payload — guarantees the cookie
+        // round-trips and gives us the canonical server view.
+        await login();
         if (res.data.is_new) {
           setShowSmtpSetup(true);
         } else {

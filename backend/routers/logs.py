@@ -75,3 +75,44 @@ async def list_logs(
             for r in page_data.results
         ],
     )
+
+
+class TopRuleStat(BaseModel):
+    label: str
+    triggers: int
+
+
+class TodayStatsResponse(BaseModel):
+    scanned: int
+    blocked: int
+    allowed: int
+    block_rate: float
+    top_rules: List[TopRuleStat]
+
+
+@router.get("/stats/today", response_model=TodayStatsResponse)
+async def stats_today(
+    # JS `Date.getTimezoneOffset()` — minutes WEST of UTC. Out-of-range
+    # values are clamped (not rejected) so a misbehaving client can't 422
+    # the dashboard out of its overview card.
+    tz_offset_minutes: int = Query(default=0),
+    customer: dict[str, Any] = Depends(get_current_customer),
+    logs: LogService = Depends(get_log_service),
+):
+    clamped = max(-840, min(840, tz_offset_minutes))
+    stats = await logs.today_stats(
+        customer_id=customer["id"],
+        tz_offset_minutes=clamped,
+    )
+    scanned = int(stats.get("scanned", 0))
+    blocked = int(stats.get("blocked", 0))
+    return TodayStatsResponse(
+        scanned=scanned,
+        blocked=blocked,
+        allowed=int(stats.get("allowed", 0)),
+        block_rate=round(blocked / scanned, 4) if scanned else 0.0,
+        top_rules=[
+            TopRuleStat(label=r["label"], triggers=int(r["triggers"]))
+            for r in stats.get("top_rules", [])
+        ],
+    )

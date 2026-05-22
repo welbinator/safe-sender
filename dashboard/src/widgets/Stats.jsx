@@ -1,42 +1,27 @@
-
 import { useEffect, useState } from 'react';
 import api from '../api';
 import styles from './Stats.module.css';
 
+/**
+ * Overview card — server-side aggregation (F-39).
+ *
+ * Previously this widget pulled `/logs?date_from=YYYY-MM-DD&limit=500` and
+ * counted in the browser, which (a) capped at 500 rows and silently
+ * under-reported above that, (b) shipped every log row over the wire just
+ * to compute three integers, and (c) misclassified today/yesterday for
+ * users east of UTC.
+ *
+ * The backend now does all of this in SQL; we pass the client's timezone
+ * offset (F-56) so "today" matches the user's wall clock.
+ */
 export default function Stats() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    // Derive stats from logs endpoint (today's date range, LOCAL time — not UTC,
-    // otherwise users west of UTC see "0" after their local midnight has passed
-    // but before UTC midnight, and miss scans done late evening local time).
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    api.get('/logs', { params: { date_from: today, limit: 500 } })
-      .then(r => {
-        const logs = r.data.results || [];
-        const scanned = logs.length;
-        const blocked = logs.filter(l => l.outcome === 'blocked').length;
-        const allowed = logs.filter(l => l.outcome === 'allowed').length;
-
-        // Top triggered rules — derive from the joined rule metadata returned
-        // by /logs (matched_rule_name / matched_rule_pattern). The old code
-        // read `l.matched_rule` which doesn't exist, so this card was
-        // permanently empty (F-40).
-        const ruleCounts = {};
-        logs
-          .filter(l => l.matched_rule_id)
-          .forEach(l => {
-            const label = l.matched_rule_name || l.matched_rule_pattern || '(deleted rule)';
-            ruleCounts[label] = (ruleCounts[label] || 0) + 1;
-          });
-        const topRules = Object.entries(ruleCounts)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 5);
-
-        setData({ scanned, blocked, allowed, topRules });
-      })
+    const tzOffset = new Date().getTimezoneOffset();
+    api.get('/logs/stats/today', { params: { tz_offset_minutes: tzOffset } })
+      .then(r => setData(r.data))
       .catch(() => setError('Failed to load stats'));
   }, []);
 
@@ -61,18 +46,18 @@ export default function Stats() {
         </div>
       </div>
 
-      {data.topRules.length > 0 && (
+      {data.top_rules && data.top_rules.length > 0 && (
         <div className={styles.topRules}>
           <h2>Top Triggered Rules</h2>
           <table className={styles.table}>
             <thead>
-              <tr><th>Rule Pattern</th><th>Triggers</th></tr>
+              <tr><th>Rule</th><th>Triggers</th></tr>
             </thead>
             <tbody>
-              {data.topRules.map(([rule, count]) => (
-                <tr key={rule}>
-                  <td><code>{rule}</code></td>
-                  <td>{count}</td>
+              {data.top_rules.map(({ label, triggers }) => (
+                <tr key={label}>
+                  <td><code>{label}</code></td>
+                  <td>{triggers}</td>
                 </tr>
               ))}
             </tbody>

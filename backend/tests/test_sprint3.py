@@ -42,7 +42,9 @@ def register_customer(client, domain: str = None, sub: str = None) -> dict:
         "/auth/google",
         json={
             "id_token": fake_google_token(sub, email),
-            "domain": domain,
+            # F-37: `domain` is no longer accepted — server derives it from
+            # the Google `hd` claim. The `fake_google_token` helper bakes
+            # `hd: <domain>` into the fake token via the email split.
             "company_name": "Test Corp",
         },
     )
@@ -104,7 +106,6 @@ class TestAuthGoogle:
             "/auth/google",
             json={
                 "id_token": fake_google_token(fake_customer["sub"], fake_customer["email"]),
-                "domain": fake_customer["domain"],
             },
         )
         assert resp.status_code == 200
@@ -117,7 +118,6 @@ class TestAuthGoogle:
             "/auth/google",
             json={
                 "id_token": fake_google_token(other_sub, other_email),
-                "domain": fake_customer["domain"],
             },
         )
         assert resp.status_code == 409
@@ -289,6 +289,36 @@ class TestLogs:
         )
         assert resp.status_code == 200
         assert resp.json()["page_size"] == 10
+
+    def test_today_stats_empty_returns_zero(self, client, fake_customer):
+        """F-39: server-side aggregation works with no rows."""
+        resp = client.get(
+            "/logs/stats/today",
+            headers=auth_headers(fake_customer["token"]),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["scanned"] == 0
+        assert data["blocked"] == 0
+        assert data["allowed"] == 0
+        assert data["block_rate"] == 0.0
+        assert data["top_rules"] == []
+
+    def test_today_stats_accepts_tz_offset(self, client, fake_customer):
+        """F-56: tz_offset_minutes query param is honored."""
+        resp = client.get(
+            "/logs/stats/today?tz_offset_minutes=-480",
+            headers=auth_headers(fake_customer["token"]),
+        )
+        assert resp.status_code == 200
+
+    def test_today_stats_clamps_extreme_tz(self, client, fake_customer):
+        """Out-of-range tz_offset_minutes is clamped, not rejected."""
+        resp = client.get(
+            "/logs/stats/today?tz_offset_minutes=999999",
+            headers=auth_headers(fake_customer["token"]),
+        )
+        assert resp.status_code == 200
 
     def test_logs_invalid_outcome(self, client, fake_customer):
         resp = client.get(

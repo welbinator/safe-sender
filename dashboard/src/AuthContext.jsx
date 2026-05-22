@@ -30,8 +30,14 @@ export function AuthProvider({ children }) {
   }, []);
 
   // login() is called by the Google callback AFTER the server set the cookie.
-  const login = (customerData) => {
-    setCustomer(customerData);
+  // F-43: don't trust the payload echoed by /auth/google — re-fetch /me so
+  // we know the cookie actually round-trips AND we have the canonical
+  // server view of the customer (no client/server drift on plan, status,
+  // etc.). If the refetch fails, treat the login as failed.
+  const login = async () => {
+    const r = await getMe();
+    setCustomer(r.data);
+    return r.data;
   };
 
   const logout = async () => {

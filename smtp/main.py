@@ -138,6 +138,11 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             base["exc"] = self.formatException(record.exc_info)
+        # F-48: surface the per-SMTP-transaction request id when one's in
+        # scope so log lines correlate with backend access logs.
+        rid = _request_id_ctx.get() if "_request_id_ctx" in globals() else None
+        if rid:
+            base["request_id"] = rid
         # Merge any extra fields passed via `extra=`
         for key, val in record.__dict__.items():
             if key not in (
@@ -176,6 +181,30 @@ if INTERNAL_SHARED_SECRET in _WEAK_SECRETS or len(INTERNAL_SHARED_SECRET) < 32:
     )
     sys.exit(1)
 _INTERNAL_HEADERS = {"X-Internal-Secret": INTERNAL_SHARED_SECRET}
+
+# F-48 — per-message correlation id. Each SMTP transaction picks a UUID;
+# every outbound HTTP call to the backend (rules, suppression, scan-log
+# insert) carries it as X-Request-Id, and we include it in our own log
+# lines so a delivery problem can be traced from the relay all the way
+# through the backend without grepping by timestamp.
+import contextvars
+import uuid as _uuid
+
+_request_id_ctx: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "request_id", default=None
+)
+
+
+def _current_request_id() -> str | None:
+    return _request_id_ctx.get()
+
+
+def _internal_headers() -> dict[str, str]:
+    """_INTERNAL_HEADERS plus X-Request-Id when one is in scope."""
+    rid = _current_request_id()
+    if rid is None:
+        return _INTERNAL_HEADERS
+    return {**_INTERNAL_HEADERS, "X-Request-Id": rid}
 
 # Comma-separated CIDR ranges allowed to connect on port 25 (Google SMTP relay
 # MTA->MTA). Defaults to Google's published _spf.google.com ranges as of 2025;
@@ -410,7 +439,7 @@ async def _fetch_rules(domain: str) -> dict | None:
     Returns dict with 'customer_id' and 'rules', or None if domain not found.
     """
     url = f"{BACKEND_URL}/internal/rules/{domain}"
-    async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS) as session:
+    async with aiohttp.ClientSession(headers=_internal_headers()) as session:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status in (404, 403):
                 return None
@@ -427,7 +456,7 @@ async def _is_suppressed(customer_id: str, recipient: str) -> bool:
     addr = recipient.lower().strip("<>")
     url = f"{BACKEND_URL}/internal/suppressed/{customer_id}/{addr}"
     try:
-        async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS) as session:
+        async with aiohttp.ClientSession(headers=_internal_headers()) as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 if resp.status == 200:
                     return True
@@ -461,7 +490,7 @@ async def _log_scan(
         "outcome": outcome,
     }
     try:
-        async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS) as session:
+        async with aiohttp.ClientSession(headers=_internal_headers()) as session:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status not in (200, 201):
                     body = await resp.text()
@@ -585,6 +614,10 @@ class SafeSenderHandler:
         return "250 OK"
 
     async def handle_DATA(self, server, session, envelope) -> str:
+        # F-48: mint a correlation id per SMTP transaction. Anything inside
+        # this coroutine (helpers, aiohttp calls, log lines) can pick it
+        # up via _current_request_id().
+        _request_id_ctx.set(_uuid.uuid4().hex)
         mail_from: str = envelope.mail_from or ""
         rcpt_tos: list[str] = envelope.rcpt_tos
         raw_content: bytes = envelope.content if isinstance(envelope.content, bytes) else envelope.content.encode()

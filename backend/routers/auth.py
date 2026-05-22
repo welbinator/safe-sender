@@ -37,10 +37,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ---------------------------------------------------------------------------
 class GoogleAuthRequest(BaseModel):
     id_token: str = Field(..., max_length=4096)
-    # IGNORED for security (H12) — we trust Google's `hd` claim. Kept for
-    # backwards-compat with the client; do NOT use without re-verifying.
-    domain: Optional[str] = Field(default=None, max_length=253)
     company_name: Optional[str] = Field(default=None, max_length=200)
+
+    # F-37: previously accepted-and-ignored `domain`. We now hard-reject any
+    # client that sends it so callers don't silently assume the server honors
+    # it. Domain is *always* derived from Google's signed `hd` claim.
+    model_config = {"extra": "forbid"}
 
 
 class AuthResponse(BaseModel):
