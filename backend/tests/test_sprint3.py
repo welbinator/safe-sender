@@ -49,12 +49,16 @@ def register_customer(client, domain: str = None, sub: str = None) -> dict:
     assert resp.status_code == 200, f"register_customer failed: {resp.status_code} {resp.text}"
     data = resp.json()
     # Sprint B C13: JWT is delivered via HttpOnly `session` cookie, not body.
-    # Extract it for Bearer-auth tests, then clear the jar so each registration
-    # starts cookieless (otherwise the next test inherits this customer).
+    # Sprint C3 F-11: paired `csrf_token` cookie is set alongside session.
+    # Extract both for Bearer-auth + CSRF tests, then clear the jar so each
+    # registration starts cookieless (otherwise the next test inherits this
+    # customer).
     session_token = resp.cookies.get("session")
+    csrf_token = resp.cookies.get("csrf_token")
     client.cookies.clear()
     return {
         "token": session_token,
+        "csrf_token": csrf_token,
         "customer_id": data["customer_id"],
         "email": email,
         "domain": domain,
@@ -295,31 +299,46 @@ class TestLogs:
 
 
 class TestCsrfProtection:
-    """Sprint C1 hotfix (audit C-3): cookie-authenticated mutations must
-    carry the X-Requested-With: sender-safety header. Bearer-auth bypasses."""
+    """Sprint C3 F-11: double-submit-cookie CSRF. Cookie-authenticated
+    mutations require the X-CSRF-Token header to equal the csrf_token cookie.
+    Bearer-auth bypasses (no cookie surface)."""
 
     def test_cookie_mutation_without_csrf_header_is_rejected(self, client):
         info = register_customer(client)
         client.cookies.set("session", info["token"])
+        client.cookies.set("csrf_token", info["csrf_token"])
         resp = client.post("/rules", json={
             "pattern": "test", "match_type": "string", "action": "block",
         })
         assert resp.status_code == 403, resp.text
         assert "CSRF" in resp.json()["detail"]
 
-    def test_cookie_mutation_with_csrf_header_succeeds(self, client):
+    def test_cookie_mutation_with_mismatched_csrf_header_is_rejected(self, client):
         info = register_customer(client)
         client.cookies.set("session", info["token"])
+        client.cookies.set("csrf_token", info["csrf_token"])
+        resp = client.post(
+            "/rules",
+            json={"pattern": "x", "match_type": "string", "action": "block"},
+            headers={"X-CSRF-Token": "wrong-value"},
+        )
+        assert resp.status_code == 403, resp.text
+
+    def test_cookie_mutation_with_matching_csrf_header_succeeds(self, client):
+        info = register_customer(client)
+        client.cookies.set("session", info["token"])
+        client.cookies.set("csrf_token", info["csrf_token"])
         resp = client.post(
             "/rules",
             json={"pattern": "ok", "match_type": "string", "action": "block"},
-            headers={"X-Requested-With": "sender-safety"},
+            headers={"X-CSRF-Token": info["csrf_token"]},
         )
         assert resp.status_code in (200, 201), resp.text
 
     def test_cookie_GET_does_not_require_csrf_header(self, client):
         info = register_customer(client)
         client.cookies.set("session", info["token"])
+        client.cookies.set("csrf_token", info["csrf_token"])
         resp = client.get("/customers/me")
         assert resp.status_code == 200, resp.text
 

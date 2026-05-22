@@ -21,7 +21,6 @@ class LogEntry(BaseModel):
     id: str
     sender: str
     recipient: str
-    subject: Optional[str]
     outcome: str
     matched_rule_id: Optional[str]
     matched_rule_name: Optional[str]
@@ -66,7 +65,6 @@ async def list_logs(
                 id=str(r["id"]),
                 sender=r["sender"],
                 recipient=r["recipient"],
-                subject=r["subject"],
                 outcome=r["outcome"],
                 matched_rule_id=str(r["matched_rule_id"]) if r["matched_rule_id"] else None,
                 matched_rule_name=r["matched_rule_name"],

@@ -223,7 +223,10 @@ class ScanLogRequest(BaseModel):
     subject_hash: str = Field(..., max_length=128)  # hex SHA-256
     matched_rule_id: Optional[str] = Field(default=None, max_length=64)
     outcome: str = Field(..., max_length=16)
-    subject: str = Field(default="", max_length=998)  # RFC 5322 line cap
+    # F-08: plaintext `subject` removed — only the HMAC `subject_hash` is stored.
+    # Accept-and-discard remains for one rollout window so an older SMTP worker
+    # POSTing the field doesn't 422; safe to delete after all SMTP workers ship.
+    subject: Optional[str] = Field(default=None, max_length=998, deprecated=True)
 
     @field_validator("outcome")
     @classmethod
@@ -241,8 +244,8 @@ async def create_scan_log(body: ScanLogRequest):
         await conn.execute(
             """
             INSERT INTO scan_logs
-                (customer_id, sender, recipient, subject_hash, matched_rule_id, outcome, subject)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (customer_id, sender, recipient, subject_hash, matched_rule_id, outcome)
+            VALUES ($1, $2, $3, $4, $5, $6)
             """,
             body.customer_id,
             body.sender,
@@ -250,7 +253,6 @@ async def create_scan_log(body: ScanLogRequest):
             body.subject_hash,
             body.matched_rule_id,
             body.outcome,
-            body.subject,
         )
     return {"status": "logged"}
 

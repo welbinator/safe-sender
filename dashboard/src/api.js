@@ -7,15 +7,29 @@ const BASE_URL = import.meta.env.VITE_API_URL || '/api';
 // localStorage — XSS can no longer steal the JWT.
 const api = axios.create({ baseURL: BASE_URL, withCredentials: true });
 
-// Sprint C1 CSRF hotfix: every request carries a custom header. The backend
-// requires this header on cookie-authenticated mutations (POST/PUT/PATCH/DELETE).
-// Browsers refuse to attach custom headers cross-origin without a CORS
-// preflight — which our backend doesn't grant to third-party origins — so a
-// malicious site can't forge a state-changing request even while the user's
-// session cookie is live.
+// Sprint C3 F-11: double-submit-cookie CSRF. The backend sets a non-HttpOnly
+// `csrf_token` cookie at login (256-bit random). We read it here and mirror
+// it into the X-CSRF-Token header on every request. A cross-origin attacker
+// can neither read this cookie (Same-Origin Policy) nor guess the token, so
+// they can't satisfy the backend's constant-time check even while the browser
+// auto-sends the session cookie.
+function readCookie(name) {
+  const prefix = name + '=';
+  for (const part of document.cookie.split(';')) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) {
+      return decodeURIComponent(trimmed.slice(prefix.length));
+    }
+  }
+  return '';
+}
+
 api.interceptors.request.use((config) => {
   config.headers = config.headers || {};
-  config.headers['X-Requested-With'] = 'sender-safety';
+  const csrf = readCookie('csrf_token');
+  if (csrf) {
+    config.headers['X-CSRF-Token'] = csrf;
+  }
   return config;
 });
 

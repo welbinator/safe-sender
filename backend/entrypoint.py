@@ -74,6 +74,27 @@ if __name__ == "__main__":
         sys.path.insert(0, app_dir)
     os.chdir(app_dir)
 
+    # Sprint C3 F-11 followup: run Alembic migrations before serving traffic.
+    # Idempotent — `alembic upgrade head` is a no-op if the DB is current.
+    # Fail-fast: if migrations error, we refuse to start uvicorn rather than
+    # serve traffic against a schema we don't trust.
+    import subprocess
+    print("[entrypoint] Running alembic upgrade head...", flush=True)
+    result = subprocess.run(
+        ["alembic", "upgrade", "head"],
+        cwd=app_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        print(result.stdout, flush=True)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, flush=True)
+    if result.returncode != 0:
+        print(f"[entrypoint] FATAL: alembic upgrade failed (exit {result.returncode})", file=sys.stderr, flush=True)
+        sys.exit(result.returncode)
+    print("[entrypoint] Migrations applied.", flush=True)
+
     # Replace this process with uvicorn
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, loop="asyncio")  # nosec B104 - container binding; exposure controlled by Docker port mapping

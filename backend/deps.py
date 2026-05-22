@@ -6,8 +6,15 @@ set by POST /auth/google. We also accept `Authorization: Bearer <jwt>` as a
 fallback so non-browser API clients and the transition window keep working —
 this is gated by ALLOW_BEARER_AUTH (default "1"). Flip to "0" after the
 frontend has fully moved to cookies.
+
+CSRF (Sprint C3 F-11): cookie-authenticated mutating requests must pass the
+double-submit-cookie check: the `csrf_token` cookie (non-HttpOnly, set at login)
+must equal the `X-CSRF-Token` request header. Cross-origin attackers can't read
+the cookie, so they can't forge the header. Bearer-auth bypasses (no cookie =
+no CSRF surface).
 """
 import os
+import secrets
 from typing import Any, Optional
 
 import asyncpg
@@ -22,14 +29,25 @@ from repositories import (
     SuppressionRepository,
 )
 
-# Sprint C1 hotfix (audit C-3): mutating requests authenticated by the
-# `session` cookie MUST carry this custom header. Browsers won't attach
-# custom headers cross-origin without a CORS preflight (which the backend
-# only grants to its own dashboard origin), so a third-party site cannot
-# forge a state-changing call even while the cookie is live.
-_CSRF_HEADER = "X-Requested-With"
-_CSRF_EXPECTED = "sender-safety"
+# Sprint C3 F-11: double-submit-cookie CSRF.
+#   - On login we set a non-HttpOnly `csrf_token` cookie (JS can read it).
+#   - The frontend mirrors it into the `X-CSRF-Token` header on every mutation.
+#   - We compare cookie value vs header value with constant-time equality.
+# A cross-origin attacker can neither read the cookie (Same-Origin Policy) nor
+# guess the random 256-bit token, so they can't satisfy the header check even
+# while the browser auto-sends the session cookie.
+#
+# This replaces the C1 hotfix that only checked for `X-Requested-With:
+# sender-safety` — a constant string that a same-site XSS or any client could
+# trivially attach.
+_CSRF_HEADER = "X-CSRF-Token"
+_CSRF_COOKIE = "csrf_token"
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def issue_csrf_token() -> str:
+    """Mint a 256-bit URL-safe random token for the csrf_token cookie."""
+    return secrets.token_urlsafe(32)
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -51,13 +69,19 @@ def _extract_token(request: Request, session_cookie: Optional[str]) -> str:
     if session_cookie:
         if request.method in _MUTATING_METHODS:
             header_val = request.headers.get(_CSRF_HEADER, "")
-            if header_val != _CSRF_EXPECTED:
+            cookie_val = request.cookies.get(_CSRF_COOKIE, "")
+            # Both must be present and constant-time equal. Empty strings
+            # fail by definition (compare_digest of "" == "" returns True,
+            # so we must also reject empty explicitly).
+            if not header_val or not cookie_val or not secrets.compare_digest(
+                header_val, cookie_val
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=(
-                        "Missing or invalid CSRF header. "
-                        f"Cookie-authenticated {request.method} requests must "
-                        f"include `{_CSRF_HEADER}: {_CSRF_EXPECTED}`."
+                        "CSRF check failed. Cookie-authenticated "
+                        f"{request.method} requests must mirror the "
+                        f"`{_CSRF_COOKIE}` cookie into the `{_CSRF_HEADER}` header."
                     ),
                 )
         return session_cookie
