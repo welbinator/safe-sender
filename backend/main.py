@@ -27,6 +27,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time as _time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -84,21 +85,84 @@ app.add_middleware(RequestIdMiddleware)
 
 # ---------------------------------------------------------------------------
 # F-45 — Prometheus instrumentation.
-# Exposes /metrics with per-endpoint request count, latency histogram, and
-# in-progress gauge. Nothing in nginx.conf forwards /metrics, so the endpoint
-# is reachable only from inside the Docker network (scraped by a sidecar /
-# Prometheus container, not the public internet).
+# We use prometheus_client directly rather than prometheus-fastapi-
+# instrumentator because that wrapper caps starlette<1.0.0, and starlette
+# 0.52.x has PYSEC-2026-161. Direct exposition is small and gives us the same
+# three signals (request count, latency, in-progress) plus full control.
+#
+# Nothing in nginx.conf forwards /metrics, so the endpoint is reachable only
+# from inside the Docker network (scraped by a sidecar / Prometheus container,
+# not the public internet).
 # ---------------------------------------------------------------------------
-try:
-    from prometheus_fastapi_instrumentator import Instrumentator  # type: ignore
+from prometheus_client import (  # noqa: E402
+    CONTENT_TYPE_LATEST,
+    REGISTRY,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
+from starlette.requests import Request as _PromRequest  # noqa: E402
+from starlette.responses import Response as _PromResponse  # noqa: E402
 
-    Instrumentator(
-        should_group_status_codes=True,
-        should_ignore_untemplated=True,
-        excluded_handlers=["/health", "/healthz", "/metrics"],
-    ).instrument(app).expose(app, include_in_schema=False, should_gzip=True)
-except ImportError:  # pragma: no cover — only hit in stripped test envs
-    logger.warning("prometheus-fastapi-instrumentator not installed; /metrics disabled")
+
+def _get_or_create(metric_cls, name, *args, **kwargs):
+    """Return existing metric on re-import (tests reload `main`) instead of
+    raising ``Duplicated timeseries in CollectorRegistry``.
+    """
+    existing = REGISTRY._names_to_collectors.get(name)
+    if existing is not None:
+        return existing
+    return metric_cls(name, *args, **kwargs)
+
+
+_PROM_REQUESTS = _get_or_create(
+    Counter,
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "handler", "status"],
+)
+_PROM_LATENCY = _get_or_create(
+    Histogram,
+    "http_request_duration_seconds",
+    "HTTP request latency in seconds",
+    ["method", "handler"],
+)
+_PROM_INPROGRESS = _get_or_create(
+    Gauge,
+    "http_requests_in_progress",
+    "HTTP requests currently being processed",
+    ["method", "handler"],
+)
+_PROM_EXCLUDED = {"/health", "/healthz", "/metrics"}
+
+
+@app.middleware("http")
+async def _prometheus_middleware(request: _PromRequest, call_next):
+    path = request.url.path
+    if path in _PROM_EXCLUDED:
+        return await call_next(request)
+    # Use the matched route template ("/rules/{id}") rather than the raw path
+    # so high-cardinality URLs don't explode the metric series.
+    route = request.scope.get("route")
+    handler = getattr(route, "path", path) if route else path
+    method = request.method
+    _PROM_INPROGRESS.labels(method, handler).inc()
+    start = _time.perf_counter()
+    status = "500"
+    try:
+        response = await call_next(request)
+        status = str(response.status_code)
+        return response
+    finally:
+        _PROM_LATENCY.labels(method, handler).observe(_time.perf_counter() - start)
+        _PROM_REQUESTS.labels(method, handler, status).inc()
+        _PROM_INPROGRESS.labels(method, handler).dec()
+
+
+@app.get("/metrics", include_in_schema=False)
+async def _metrics() -> _PromResponse:
+    return _PromResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 # ---------------------------------------------------------------------------
 # Database connection pool (created on startup; lives in db.py — F-13)
 # ---------------------------------------------------------------------------

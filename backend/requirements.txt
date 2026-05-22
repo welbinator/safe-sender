@@ -11,12 +11,15 @@ dnspython==2.7.0
 boto3==1.35.99
 bcrypt==4.2.0
 cryptography==46.0.7
-# Pinned via fastapi's transitive requirement (>=0.46.0). The earlier
-# explicit `starlette==1.0.1` was unsatisfiable (fastapi requires <1.0.0 in
-# this version range) and was silently ignored by `pip install`. Letting
-# pip-tools resolve it produces an actually-installable lockfile.
-starlette>=0.46.0,<1.0.0
+# F-53 / PYSEC-2026-161 — starlette 1.0.1 fixes a vulnerability present in
+# 0.52.x. FastAPI 0.136.x supports starlette 1.x. Pin exact to keep the
+# lockfile reproducible.
+starlette==1.0.1
 google-re2==1.1.20251105
 alembic==1.14.0
 psycopg2-binary==2.9.10
-prometheus-fastapi-instrumentator==7.0.0
+# F-45 — Prometheus exposition. Using prometheus_client directly (not
+# prometheus-fastapi-instrumentator) because the instrumentator caps
+# starlette<1.0.0 and starlette 0.52.x has PYSEC-2026-161 (fix in 1.0.1).
+# Direct exposition is ~30 lines and matches what the instrumentator wraps.
+prometheus-client==0.21.0
