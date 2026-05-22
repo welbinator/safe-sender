@@ -14,6 +14,13 @@ import asyncpg
 from fastapi import Cookie, Depends, HTTPException, Request, status
 
 from auth_utils import decode_jwt
+from repositories import (
+    AdminAuditRepository,
+    CustomerRepository,
+    RuleRepository,
+    ScanLogRepository,
+    SuppressionRepository,
+)
 
 # Sprint C1 hotfix (audit C-3): mutating requests authenticated by the
 # `session` cookie MUST carry this custom header. Browsers won't attach
@@ -85,13 +92,53 @@ async def get_current_customer(
         )
 
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM customers WHERE id = $1 AND active = true",
-            customer_id,
-        )
+        row = await CustomerRepository(conn).get_active_by_id(customer_id)
     if not row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Customer not found",
         )
-    return dict(row)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Repository factory dependencies
+#
+# Each factory acquires a connection from the pool for the lifetime of the
+# request via FastAPI's generator-based dependency contract. Routers receive a
+# fully-constructed repo and never touch raw SQL or the pool themselves.
+# ---------------------------------------------------------------------------
+
+async def get_customer_repo(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    async with pool.acquire() as conn:
+        yield CustomerRepository(conn)
+
+
+async def get_rule_repo(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    async with pool.acquire() as conn:
+        yield RuleRepository(conn)
+
+
+async def get_scan_log_repo(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    async with pool.acquire() as conn:
+        yield ScanLogRepository(conn)
+
+
+async def get_suppression_repo(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    async with pool.acquire() as conn:
+        yield SuppressionRepository(conn)
+
+
+async def get_admin_audit_repo(
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    async with pool.acquire() as conn:
+        yield AdminAuditRepository(conn)

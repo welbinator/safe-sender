@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from auth_utils import create_jwt, verify_google_id_token
 from deps import get_pool
+from repositories import CustomerRepository
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SES_SOURCE_ARN = os.environ.get("SES_SOURCE_ARN", "")
@@ -186,10 +187,9 @@ async def auth_google(
     company_name = body.company_name or name
 
     async with pool.acquire() as conn:
+        customers = CustomerRepository(conn)
         # Look up by google_sub first (returning customer)
-        row = await conn.fetchrow(
-            "SELECT id, email FROM customers WHERE google_sub = $1", google_sub
-        )
+        row = await customers.get_by_google_sub(google_sub)
         smtp_username = None
         smtp_raw_password = None
         if row:
@@ -197,10 +197,7 @@ async def auth_google(
             is_new = False
         else:
             # Check if someone already registered this domain under a different Google account
-            domain_row = await conn.fetchrow(
-                "SELECT id FROM customers WHERE domain = $1", domain
-            )
-            if domain_row:
+            if await customers.get_by_domain(domain):
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -211,18 +208,13 @@ async def auth_google(
 
             # New customer — generate SMTP credentials + insert
             smtp_username, smtp_raw_password, smtp_password_hash = _generate_smtp_credentials()
-            row = await conn.fetchrow(
-                """
-                INSERT INTO customers (domain, name, email, google_sub, plan, smtp_username, smtp_password_hash)
-                VALUES ($1, $2, $3, $4, 'basic', $5, $6)
-                RETURNING id, email
-                """,
-                domain,
-                company_name,
-                email,
-                google_sub,
-                smtp_username,
-                smtp_password_hash,
+            row = await customers.create(
+                domain=domain,
+                name=company_name,
+                email=email,
+                google_sub=google_sub,
+                smtp_username=smtp_username,
+                smtp_password_hash=smtp_password_hash,
             )
             customer_id = str(row["id"])
             is_new = True
