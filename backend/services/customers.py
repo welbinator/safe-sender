@@ -12,6 +12,7 @@ response serialization out, exception translation at the edge.
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import smtplib
 import time
@@ -30,12 +31,13 @@ from .errors import DomainVerificationNotInitialized, NotFoundError
 _VERIFICATION_TXT_PREFIX = "sendersafety-verify="
 _VERIFICATION_TXT_LABEL = "_sendersafety"
 
-# Smoke-test config — these mirror the historical router constants.
-_SMTP_GATEWAY_HOST = "smtp.sendersafety.com"
-_SMTP_GATEWAY_PORT = 587
-_TEST_RECIPIENT = "delivery-test@sendersafety.com"
+# Smoke-test config (F-15) — env-overridable so staging vs prod can differ
+# without a code change. Defaults preserve production behaviour.
+_SMTP_GATEWAY_HOST = os.environ.get("SMTP_GATEWAY_HOST", "smtp.sendersafety.com")
+_SMTP_GATEWAY_PORT = int(os.environ.get("SMTP_GATEWAY_PORT", "587"))
+_TEST_RECIPIENT = os.environ.get("SMTP_TEST_RECIPIENT", "delivery-test@sendersafety.com")
 _TEST_SUBJECT = "Sender Safety connection test"
-_TEST_POLL_DEADLINE_SECS = 10
+_TEST_POLL_DEADLINE_SECS = int(os.environ.get("SMTP_TEST_POLL_DEADLINE_SECS", "10"))
 
 
 class DomainVerificationResult:

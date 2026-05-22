@@ -46,6 +46,20 @@ _CSRF_COOKIE = "csrf_token"
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
+# Sprint C3 F-20: ALLOW_BEARER_AUTH=1 disables CSRF protection (no cookie, no
+# header). It exists for test runs and curl-debugging from the operator's
+# machine. In production environments it must NEVER be on — fail the boot
+# loudly rather than silently exposing an auth bypass.
+_APP_ENV = os.environ.get("APP_ENV", "development").lower()
+_ALLOW_BEARER_AUTH = os.environ.get("ALLOW_BEARER_AUTH", "0") == "1"
+if _ALLOW_BEARER_AUTH and _APP_ENV in {"production", "prod"}:
+    raise RuntimeError(
+        "ALLOW_BEARER_AUTH=1 is forbidden when APP_ENV=production. "
+        "Bearer auth bypasses CSRF protection and must only be enabled "
+        "in dev/test environments."
+    )
+
+
 def issue_csrf_token() -> str:
     """Mint a 256-bit URL-safe random token for the csrf_token cookie."""
     return secrets.token_urlsafe(32)
@@ -90,7 +104,7 @@ def _extract_token(request: Request, session_cookie: Optional[str]) -> str:
                     ),
                 )
         return session_cookie
-    if os.environ.get("ALLOW_BEARER_AUTH", "0") == "1":
+    if _ALLOW_BEARER_AUTH:
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             return auth.split(" ", 1)[1].strip()
