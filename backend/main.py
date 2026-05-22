@@ -81,6 +81,24 @@ from db import close_pool, get_pool, set_pool
 
 app = FastAPI(title="Sender Safety API", version="0.3.0")
 app.add_middleware(RequestIdMiddleware)
+
+# ---------------------------------------------------------------------------
+# F-45 — Prometheus instrumentation.
+# Exposes /metrics with per-endpoint request count, latency histogram, and
+# in-progress gauge. Nothing in nginx.conf forwards /metrics, so the endpoint
+# is reachable only from inside the Docker network (scraped by a sidecar /
+# Prometheus container, not the public internet).
+# ---------------------------------------------------------------------------
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator  # type: ignore
+
+    Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=True,
+        excluded_handlers=["/health", "/healthz", "/metrics"],
+    ).instrument(app).expose(app, include_in_schema=False, should_gzip=True)
+except ImportError:  # pragma: no cover — only hit in stripped test envs
+    logger.warning("prometheus-fastapi-instrumentator not installed; /metrics disabled")
 # ---------------------------------------------------------------------------
 # Database connection pool (created on startup; lives in db.py — F-13)
 # ---------------------------------------------------------------------------
@@ -156,21 +174,45 @@ app.include_router(admin.router)
 
 @app.get("/health")
 async def health() -> dict:
-    """Liveness + DB readiness probe (F-47).
+    """Liveness + DB readiness probe (F-47, F-46).
 
-    A 200 here means the process is up AND can round-trip a query to Postgres.
-    A pure liveness check (always-200) misled the loadbalancer during DB
-    outages — requests landed on backends that immediately 500'd. Now if PG
-    is unreachable we return 503 and the proxy can route around us.
+    A 200 here means the process is up AND can round-trip a query to Postgres
+    within 1 second. A pure liveness check (always-200) misled the loadbalancer
+    during DB outages — requests landed on backends that immediately 500'd. Now
+    if PG is unreachable, or the asyncpg pool is fully saturated (every conn
+    busy + every waiter timing out), we return 503 and the proxy can route
+    around us. Pool stats are echoed so Prometheus / `/metrics` consumers can
+    alert on chronic saturation before it tips over.
     """
     try:
         pool = get_pool()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
+        # F-46: acquire with a hard 1s timeout. If the pool is exhausted long
+        # enough that we can't even get a connection inside a second, that's a
+        # saturation signal and we want the LB to shed load, not queue it.
+        async with asyncio.timeout(1):
+            async with pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        logger.warning(
+            "health: pool exhausted (size=%s free=%s): %s",
+            pool.get_size() if "pool" in locals() else "?",
+            pool.get_idle_size() if "pool" in locals() else "?",
+            exc,
+        )
+        raise HTTPException(status_code=503, detail="pool_exhausted")
     except Exception as exc:
         logger.warning("health: DB ping failed: %s", exc)
         raise HTTPException(status_code=503, detail="db_unavailable")
-    return {"status": "ok", "db": "ok"}
+    return {
+        "status": "ok",
+        "db": "ok",
+        "pool": {
+            "size": pool.get_size(),
+            "idle": pool.get_idle_size(),
+            "max": pool.get_max_size(),
+            "min": pool.get_min_size(),
+        },
+    }
 
 
 @app.get("/healthz")

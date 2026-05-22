@@ -51,3 +51,14 @@ class DomainAlreadyVerified(ServiceError):
 class DomainVerificationNotInitialized(ServiceError):
     status_code = 400
     default_message = "Run verify-domain/init first"
+
+
+class TooManyRules(ServiceError):
+    """Customer hit the per-account active-rule cap (F-52).
+
+    Cap is enforced at create-time; existing rules over the cap stay active to
+    avoid breaking customers who somehow exceeded it before the limit shipped.
+    """
+
+    status_code = 409
+    default_message = "Active rule limit reached"

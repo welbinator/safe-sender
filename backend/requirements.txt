@@ -11,7 +11,12 @@ dnspython==2.7.0
 boto3==1.35.99
 bcrypt==4.2.0
 cryptography==46.0.7
-starlette==1.0.1
+# Pinned via fastapi's transitive requirement (>=0.46.0). The earlier
+# explicit `starlette==1.0.1` was unsatisfiable (fastapi requires <1.0.0 in
+# this version range) and was silently ignored by `pip install`. Letting
+# pip-tools resolve it produces an actually-installable lockfile.
+starlette>=0.46.0,<1.0.0
 google-re2==1.1.20251105
 alembic==1.14.0
 psycopg2-binary==2.9.10
+prometheus-fastapi-instrumentator==7.0.0

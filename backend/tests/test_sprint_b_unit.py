@@ -107,3 +107,56 @@ def test_rule_keyword_skips_regex_validation():
     from services.rules import RuleService
     # Should not raise — keyword type bypasses regex compile.
     RuleService.assert_valid_regex("any string at all (^.+$)", "keyword")
+
+
+@pytest.mark.asyncio
+async def test_rule_create_blocked_at_active_cap(monkeypatch):
+    """F-52 — create raises TooManyRules when at the per-customer cap."""
+    from services import TooManyRules
+    from services.rules import RuleService
+    import services.rules as rules_mod
+
+    # Shrink the cap so the test is cheap and obvious.
+    monkeypatch.setattr(rules_mod, "MAX_ACTIVE_RULES_PER_CUSTOMER", 3)
+
+    class _FakeRepo:
+        async def count_active_for_customer(self, _cid):
+            return 3  # already at cap
+
+        async def create(self, **_kw):  # pragma: no cover - should not run
+            raise AssertionError("create() must not be called when at cap")
+
+    svc = RuleService(_FakeRepo())
+    with pytest.raises(TooManyRules):
+        await svc.create(
+            customer_id=1, name="x", pattern="foo", match_type="string",
+            scope="external", applies_to_email=None, is_exception=False,
+            description=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rule_create_allowed_below_cap(monkeypatch):
+    """F-52 — create still works when under the cap."""
+    from services.rules import RuleService
+    import services.rules as rules_mod
+
+    monkeypatch.setattr(rules_mod, "MAX_ACTIVE_RULES_PER_CUSTOMER", 3)
+    created = {}
+
+    class _FakeRepo:
+        async def count_active_for_customer(self, _cid):
+            return 2
+
+        async def create(self, **kw):
+            created.update(kw)
+            return {"id": 99, **kw}
+
+    svc = RuleService(_FakeRepo())
+    row = await svc.create(
+        customer_id=1, name="x", pattern="foo", match_type="string",
+        scope="external", applies_to_email=None, is_exception=False,
+        description=None,
+    )
+    assert row["id"] == 99
+    assert created["pattern"] == "foo"

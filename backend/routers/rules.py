@@ -15,7 +15,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from deps import get_current_customer, get_rule_service
-from services import InvalidRegexPattern, NotFoundError, RuleService
+from services import (
+    InvalidRegexPattern,
+    NotFoundError,
+    RuleService,
+    TooManyRules,
+)
 from services.rules import VALID_MATCH_TYPES, VALID_SCOPES
 
 router = APIRouter(prefix="/rules", tags=["rules"])
@@ -149,6 +154,8 @@ async def create_rule(
         )
     except InvalidRegexPattern as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except TooManyRules as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     return _row_to_rule(row)
 
 
@@ -175,6 +182,8 @@ async def update_rule(
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except InvalidRegexPattern as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except TooManyRules as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     return _row_to_rule(row)
 
