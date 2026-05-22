@@ -19,6 +19,7 @@ from .rules import RuleRepository
 from .scan_logs import ScanLogRepository
 from .suppressions import SuppressionRepository
 from .admin_audit import AdminAuditRepository
+from .admin_rate_limit import AdminRateLimitRepository
 
 __all__ = [
     "CustomerRepository",
@@ -26,4 +27,5 @@ __all__ = [
     "ScanLogRepository",
     "SuppressionRepository",
     "AdminAuditRepository",
+    "AdminRateLimitRepository",
 ]
