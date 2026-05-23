@@ -179,14 +179,35 @@ async def close_redis() -> None:
 _KEY_TTL_SECONDS = 300
 
 
-async def check_limit(config: LimitConfig, subject_key: str) -> LimitResult:
-    """Consume one token from the bucket. Fail-open on Redis errors.
+async def check_limit(config: LimitConfig, subject_key: str, *, fail_open: bool = True, local_fallback: bool = False) -> LimitResult:
+    """Consume one token from the bucket.
+
+    Fail-open policy (default): if Redis is unreachable or the call errors,
+    we LOG and ALLOW. Rate limiting is a quality-of-service feature for
+    customer R/W traffic — it must never take down the app.
+
+    Fail-closed (or fail-to-local) is offered for security-critical limiters
+    via ``fail_open=False`` / ``local_fallback=True``. The auth-by-IP limiter
+    uses ``local_fallback=True`` (Code Audit Two H-2): during a Redis outage,
+    drop back to a small per-process in-memory bucket. Imperfect across N
+    workers (effective cap is N × per_minute), but a tight bound beats
+    unlimited credential stuffing.
 
     `subject_key` is the per-subject identifier (customer UUID for customer
     limits, IP for auth limits). The full Redis key is `rl:<name>:<subject>`.
     """
+    if not is_enabled():
+        # Limiter intentionally disabled by env. Always allow — local_fallback
+        # is for *failure* modes (Redis down), not for explicit off-switches.
+        return LimitResult(allowed=True, retry_after_seconds=0.0)
     client = await get_redis()
     if client is None:
+        # is_enabled() was True but no client (redis package missing, etc.)
+        # — treat as Redis-unavailable.
+        if local_fallback:
+            return _local_check(config, subject_key)
+        if not fail_open:
+            return LimitResult(allowed=False, retry_after_seconds=float(config.emission_ms) / 1000.0)
         return LimitResult(allowed=True, retry_after_seconds=0.0)
 
     key = f"rl:{config.name}:{subject_key}"
@@ -199,8 +220,12 @@ async def check_limit(config: LimitConfig, subject_key: str) -> LimitResult:
             int(config.burst_ms),
             _KEY_TTL_SECONDS,
         )
-    except Exception as e:  # pragma: no cover — exercised in fail-open test
-        logger.warning("Rate-limit Redis call failed (%s); allowing request", e)
+    except Exception as e:
+        logger.warning("Rate-limit Redis call failed (%s); fail_open=%s local_fallback=%s", e, fail_open, local_fallback)
+        if local_fallback:
+            return _local_check(config, subject_key)
+        if not fail_open:
+            return LimitResult(allowed=False, retry_after_seconds=float(config.emission_ms) / 1000.0)
         return LimitResult(allowed=True, retry_after_seconds=0.0)
 
     # Lua returns ints (or floats coerced). result[0] = allowed flag.
@@ -210,6 +235,56 @@ async def check_limit(config: LimitConfig, subject_key: str) -> LimitResult:
         allowed=allowed,
         retry_after_seconds=retry_ms / 1000.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-process in-memory fallback bucket (H-2).
+#
+# Used ONLY when Redis is unavailable AND the caller asked for local_fallback.
+# Token bucket per (config.name, subject_key). Bounded LRU to cap memory.
+# Imperfect across workers (each worker has its own bucket); the goal is a
+# tight upper bound during outages, not perfect coordination.
+# ---------------------------------------------------------------------------
+import time as _time
+from collections import OrderedDict
+from threading import Lock as _Lock
+
+_LOCAL_MAX_ENTRIES = 10_000  # ~ a few hundred KiB; LRU-evicted
+_local_buckets: "OrderedDict[str, float]" = OrderedDict()  # key -> TAT (seconds)
+_local_lock = _Lock()
+
+
+def _local_check(config: LimitConfig, subject_key: str) -> LimitResult:
+    """GCRA bucket in pure Python — same algorithm as the Lua script."""
+    key = f"{config.name}:{subject_key}"
+    emission_s = config.emission_ms / 1000.0
+    burst_s = config.burst_ms / 1000.0
+    now = _time.monotonic()
+
+    with _local_lock:
+        tat = _local_buckets.get(key, now)
+        if tat < now:
+            tat = now
+        new_tat = tat + emission_s
+        allow_at = new_tat - burst_s
+        if now < allow_at:
+            # Touch LRU position even on reject (if present).
+            if key in _local_buckets:
+                _local_buckets.move_to_end(key)
+            return LimitResult(allowed=False, retry_after_seconds=allow_at - now)
+        _local_buckets[key] = new_tat
+        _local_buckets.move_to_end(key)
+        # Bound memory.
+        while len(_local_buckets) > _LOCAL_MAX_ENTRIES:
+            _local_buckets.popitem(last=False)
+    return LimitResult(allowed=True, retry_after_seconds=0.0)
+
+
+def _reset_local_buckets_for_tests() -> None:
+    """Test-only: clear the per-process bucket between cases."""
+    with _local_lock:
+        _local_buckets.clear()
+
 
 
 # Convenience helpers used by FastAPI dependencies.
@@ -223,4 +298,7 @@ async def check_customer_write(customer_id: str) -> LimitResult:
 
 
 async def check_auth_by_ip(ip: str) -> LimitResult:
-    return await check_limit(get_auth_config(), f"ip:{ip}")
+    # H-2: never fail-open for the auth limiter. If Redis is down, fall back
+    # to a per-process in-memory bucket so credential-stuffing is bounded even
+    # during a Redis outage.
+    return await check_limit(get_auth_config(), f"ip:{ip}", local_fallback=True)
