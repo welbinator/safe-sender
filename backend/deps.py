@@ -234,12 +234,37 @@ async def rate_limit_write(
         )
 
 
+# Code Audit Two — H-1: client-IP spoofing in auth rate limiter.
+#
+# Previously this returned the LEFTMOST X-Forwarded-For value, which is the
+# segment a client can set freely — nginx APPENDS the real source IP via
+# $proxy_add_x_forwarded_for, it does NOT strip whatever the client sent.
+# That let an attacker rotate `X-Forwarded-For: 1.2.3.4` per request and
+# never trip the per-IP auth limit, defeating credential-stuffing protection.
+#
+# Trust model: we sit behind exactly one trusted proxy hop (our own nginx).
+# Nginx writes `X-Real-IP: $remote_addr` on every proxied request. That value
+# is the TCP peer nginx saw — the actual client (or upstream proxy if one
+# day we add Cloudflare in front). Clients cannot influence it because nginx
+# OVERWRITES the header rather than appending. So X-Real-IP is the
+# authoritative client IP for rate-limit keying.
+#
+# Fallbacks in priority order:
+#   1. X-Real-IP            — set by nginx, not appendable.
+#   2. rightmost XFF hop    — also nginx-appended (resists left-side spoof).
+#   3. request.client.host  — direct connection (e.g. tests, bypassed nginx).
+#
+# We deliberately do NOT trust the leftmost XFF token. If we ever add a
+# second trusted proxy hop in front of nginx, revisit this and parse XFF
+# from right-to-left, popping one entry per trusted hop.
 def _client_ip(request: Request) -> str:
-    # nginx sets X-Forwarded-For; trust the first hop (we run behind our own
-    # nginx, no third-party proxy). Fall back to request.client.
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
-        return xff.split(",")[0].strip()
+        # Rightmost token = nearest proxy we trust appended it.
+        return xff.rsplit(",", 1)[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
