@@ -5,13 +5,18 @@ WORKDIR /app
 # F-53 — install from the hash-pinned lockfile, not the loose requirements
 # file. `--require-hashes` is implicit when every line in the input has a
 # hash, and it fails the build if a mirror returns a tampered wheel.
-COPY requirements.txt requirements.lock .
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY backend/requirements.txt backend/requirements.lock /app/
+RUN pip install --no-cache-dir --require-hashes -r /app/requirements.lock
 
-COPY . .
+# S-L4 — install the shared crypto package as the single source of truth
+# for F-17 KDF parameters. Drop it into site-packages so backend and smtp
+# can both `from safesender_crypto import ...` without sys.path tricks.
+COPY shared/safesender_crypto /usr/local/lib/python3.12/site-packages/safesender_crypto
 
-COPY entrypoint.sh /entrypoint.sh
-COPY entrypoint.py /entrypoint.py
+COPY backend/ /app/
+
+COPY backend/entrypoint.sh /entrypoint.sh
+COPY backend/entrypoint.py /entrypoint.py
 RUN chmod +x /entrypoint.sh
 
 # Run as non-root for least privilege.

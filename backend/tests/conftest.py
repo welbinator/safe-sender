@@ -26,6 +26,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path as _Path
+
+# S-L4 — make the shared safesender_crypto package importable without a Docker
+# build. Tests run from backend/ but the package lives at <repo>/shared/.
+sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "shared"))
 import time
 from pathlib import Path
 

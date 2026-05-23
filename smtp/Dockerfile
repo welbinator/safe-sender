@@ -7,10 +7,13 @@ FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dc
 WORKDIR /app
 
 # F-53 — hash-pinned install via lockfile.
-COPY requirements.txt requirements.lock .
-RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY smtp/requirements.txt smtp/requirements.lock /app/
+RUN pip install --no-cache-dir --require-hashes -r /app/requirements.lock
 
-COPY . .
+# S-L4 — shared F-17 crypto package (single source of truth).
+COPY shared/safesender_crypto /usr/local/lib/python3.12/site-packages/safesender_crypto
+
+COPY smtp/ /app/
 
 # S-M3 — non-root runtime.
 #
