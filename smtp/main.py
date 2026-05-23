@@ -1590,6 +1590,15 @@ if __name__ == "__main__":
 
     # Port 25 - MTA-to-MTA inbound from Google Workspace SMTP relay.
     # No SMTP-AUTH (peer-IP allowlist enforced inside handle_DATA).
+    #
+    # S-H2: opportunistic STARTTLS. We advertise STARTTLS using the same
+    # cert/key as port 587 but do NOT require it (require_starttls=False).
+    # Why opportunistic and not mandatory: MTA-to-MTA on port 25 follows
+    # RFC 3207 — sending MTAs that don't support STARTTLS would be hard-
+    # bounced if we required it. Google's SMTP relay always negotiates
+    # STARTTLS when offered, so for our actual peers this becomes de-facto
+    # TLS-only without breaking mail from any future allowlisted peer that
+    # might not support it.
     handler25 = SafeSenderHandler(port=25)
     controller25 = SafeSenderController(
         handler25,
@@ -1597,12 +1606,14 @@ if __name__ == "__main__":
         port=25,
         auth_required=False,
         auth_require_tls=False,
+        require_starttls=False,
+        tls_context=ssl_context,  # S-H2: opportunistic STARTTLS
         data_size_limit=SMTP_DATA_SIZE_LIMIT,  # S-M4
     )
     controller25.start()
     logger.info(
-        "Safe Sender SMTP started (port 25, no AUTH, peer-IP allowlist)",
-        extra={"port": 25, "allowed_networks": len(_PORT25_NETWORKS)},
+        "Safe Sender SMTP started (port 25, no AUTH, peer-IP allowlist, opportunistic STARTTLS)",
+        extra={"port": 25, "allowed_networks": len(_PORT25_NETWORKS), "starttls": "opportunistic"},
     )
 
     # S-M3 — drop privileges. Sockets 25/587 are bound and the TLS private
