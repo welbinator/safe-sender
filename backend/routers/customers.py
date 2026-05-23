@@ -62,8 +62,15 @@ class VerifyCheckResponse(BaseModel):
 
 
 class TestConnectionResponse(BaseModel):
-    success: bool
-    message: str
+    # F-16: handler returns 202 + test_id; the dashboard polls status via GET.
+    test_id: str
+    status: str  # always "pending" on POST
+
+
+class TestConnectionStatusResponse(BaseModel):
+    status: str  # "pending" | "done"
+    success: Optional[bool] = None
+    message: Optional[str] = None
 
 
 class SmtpCredentialsResponse(BaseModel):
@@ -140,20 +147,35 @@ async def verify_domain_check(
     return VerifyCheckResponse(verified=result.verified, message=result.message)
 
 
-@router.post("/test-connection", response_model=TestConnectionResponse)
+@router.post("/test-connection", response_model=TestConnectionResponse, status_code=202)
 async def test_connection(
     customer: dict[str, Any] = Depends(get_current_customer),
     service: CustomerService = Depends(get_customer_service),
 ):
-    """Send a real SMTP test email and confirm it appears in scan logs."""
-    result = await service.test_smtp_connection(
+    """Kick off an SMTP smoke-test in the background. F-16: returns immediately."""
+    test_id = await service.start_test_smtp_connection(
         customer,
         smtp_host=_SMTP_HOST,
         smtp_port=_SMTP_PORT,
         auth_username=_SMTP_AUTH_USERNAME,
         auth_password=_SMTP_AUTH_PASSWORD,
     )
-    return TestConnectionResponse(success=result.success, message=result.message)
+    return TestConnectionResponse(test_id=test_id, status="pending")
+
+
+@router.get(
+    "/test-connection/{test_id}", response_model=TestConnectionStatusResponse
+)
+async def test_connection_status(
+    test_id: str,
+    customer: dict[str, Any] = Depends(get_current_customer),
+    service: CustomerService = Depends(get_customer_service),
+):
+    """Poll for a previously-started test. 404 hides cross-tenant existence."""
+    status = await service.get_test_connection_status(test_id, customer["id"])
+    if status is None:
+        raise HTTPException(status_code=404, detail="Test not found")
+    return TestConnectionStatusResponse(**status)
 
 
 @router.get("/me/smtp-credentials", response_model=SmtpCredentialsResponse)

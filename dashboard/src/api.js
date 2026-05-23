@@ -111,6 +111,8 @@ export const getLogs = (params) => api.get('/logs', { params });
 export const verifyDomainInit = () => api.post('/customers/verify-domain/init');
 export const verifyDomainCheck = () => api.post('/customers/verify-domain/check');
 export const testConnection = () => api.post('/customers/test-connection');
+export const getTestConnectionStatus = (testId) =>
+  api.get(`/customers/test-connection/${testId}`);
 
 // Sprint 7 — SMTP credentials
 export const getSmtpCredentials = () => api.get('/customers/me/smtp-credentials');

@@ -9,7 +9,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { getMe, getRules, verifyDomainInit, verifyDomainCheck, testConnection } from '../api';
+import { getMe, getRules, verifyDomainInit, verifyDomainCheck, testConnection, getTestConnectionStatus } from '../api';
 
 // ---------------------------------------------------------------------------
 // Tiny shared UI helpers
@@ -250,8 +250,30 @@ const StepTestConnection = ({ domain, domainVerified }) => {
     setLoading(true);
     setResult(null);
     try {
-      const res = await testConnection();
-      setResult({ success: res.data.success, message: res.data.message });
+      const start = await testConnection();
+      const testId = start.data.test_id;
+      // Poll up to ~30s (15 × 2s). Matches backend SMTP/poll worst case
+      // (test_poll_deadline=10s + slack for SMTP TLS+send).
+      let finalRes = null;
+      for (let i = 0; i < 15; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const poll = await getTestConnectionStatus(testId);
+          if (poll.data.status === 'done') {
+            finalRes = { success: poll.data.success, message: poll.data.message };
+            break;
+          }
+        } catch (_) {
+          // Transient — keep polling. If the test_id 404s permanently we'll
+          // fall out of the loop and show the timeout message below.
+        }
+      }
+      setResult(
+        finalRes ?? {
+          success: false,
+          message: 'Test is still running — try again in a moment.',
+        }
+      );
     } catch (e) {
       setResult({ success: false, message: 'Request failed. Is the backend reachable?' });
     } finally {

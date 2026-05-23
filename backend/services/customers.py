@@ -59,6 +59,22 @@ class TestConnectionResult:
         self.message = message
 
 
+# F-16: background-job registry for test-connection. POST kicks off the job
+# and returns immediately with a test_id; the dashboard polls GET to learn
+# the outcome. Entries are tagged with customer_id so polling enforces
+# ownership, and pruned by TTL so a forgotten test doesn't leak forever.
+_TEST_JOB_TTL_SECS = 300  # 5 min — long enough for slow DNS, short enough to not leak.
+_test_jobs: dict[str, dict[str, Any]] = {}
+_test_jobs_lock = asyncio.Lock()
+
+
+def _prune_test_jobs(now: float) -> None:
+    """Drop jobs older than TTL. Caller holds _test_jobs_lock."""
+    expired = [tid for tid, j in _test_jobs.items() if now - j["created_at"] > _TEST_JOB_TTL_SECS]
+    for tid in expired:
+        _test_jobs.pop(tid, None)
+
+
 class CustomerService:
     """Business operations on a single Customer aggregate."""
 
@@ -221,6 +237,85 @@ class CustomerService:
         smtp_port: int = _SMTP_GATEWAY_PORT,
         auth_username: str = "",
         auth_password: str = "",
+    ) -> TestConnectionResult:  # noqa: D401 — kept for tests / legacy callers
+        return await self._run_test_smtp_connection(
+            customer, smtp_host, smtp_port, auth_username, auth_password
+        )
+
+    async def start_test_smtp_connection(
+        self,
+        customer: dict[str, Any],
+        *,
+        smtp_host: str,
+        smtp_port: int,
+        auth_username: str,
+        auth_password: str,
+    ) -> str:
+        """F-16: kick off a background test and return its test_id immediately.
+
+        The handler must NOT block on SMTP I/O. The created task lives on the
+        running event loop; the result is parked in ``_test_jobs`` until the
+        client polls it (or the TTL evicts it).
+        """
+        test_id = secrets.token_urlsafe(16)
+        now = time.time()
+        async with _test_jobs_lock:
+            _prune_test_jobs(now)
+            _test_jobs[test_id] = {
+                "customer_id": customer["id"],
+                "status": "pending",
+                "result": None,
+                "created_at": now,
+            }
+
+        async def _run() -> None:
+            try:
+                result = await self._run_test_smtp_connection(
+                    customer,
+                    smtp_host,
+                    smtp_port,
+                    auth_username,
+                    auth_password,
+                )
+                payload = {"success": result.success, "message": result.message}
+            except Exception as e:  # never let a worker exception escape silently
+                payload = {"success": False, "message": f"Internal error: {e}"}
+            async with _test_jobs_lock:
+                job = _test_jobs.get(test_id)
+                if job is not None:
+                    job["status"] = "done"
+                    job["result"] = payload
+
+        asyncio.create_task(_run())
+        return test_id
+
+    async def get_test_connection_status(
+        self, test_id: str, customer_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Return ``{status, success, message}`` for caller's own test, or None.
+
+        ``None`` means either unknown ID, expired, or owned by another customer
+        — the router collapses all three into a 404 so we never leak whether a
+        given ID exists for a different tenant.
+        """
+        async with _test_jobs_lock:
+            _prune_test_jobs(time.time())
+            job = _test_jobs.get(test_id)
+            if job is None or job["customer_id"] != customer_id:
+                return None
+            out: dict[str, Any] = {"status": job["status"]}
+            if job["status"] == "done" and job["result"]:
+                out["success"] = job["result"]["success"]
+                out["message"] = job["result"]["message"]
+            return out
+
+    async def _run_test_smtp_connection(
+        self,
+        customer: dict[str, Any],
+        smtp_host: str,
+        smtp_port: int,
+        auth_username: str,
+        auth_password: str,
     ) -> TestConnectionResult:
         """Send a test email through the gateway and poll for it in scan_logs.
 
