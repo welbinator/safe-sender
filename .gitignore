@@ -4,6 +4,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+!.env.enc
 venv/
 .venv/
 *.egg-info/
