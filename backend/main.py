@@ -340,13 +340,23 @@ async def get_rules(domain: str):
     ]
 
     # C12: hand the SMTP service this customer's HMAC key for subject hashing.
-    # Hex-encoded for clean JSON transport; SMTP decodes back to bytes.
+    # F-17: the salt is the keying material that protects subject-hash privacy.
+    # Encrypt it with the shared-secret-derived key so a tcpdump on the Docker
+    # bridge can't lift it in plaintext. SMTP decrypts with the mirror module.
+    #
+    # Transition: we return BOTH `subject_hash_salt` (legacy plaintext) and
+    # `subject_hash_salt_enc` so backend + smtp can be deployed independently.
+    # The plaintext field is dropped in a follow-up commit once smtp is
+    # confirmed pulling from `_enc`.
+    from internal_crypto import encrypt_field
     salt_hex = bytes(customer["subject_hash_salt"]).hex()
+    salt_encrypted = encrypt_field(salt_hex)
 
     return {
         "customer_id": str(customer_id),
         "rules": rules_list,
         "subject_hash_salt": salt_hex,
+        "subject_hash_salt_enc": salt_encrypted,
     }
 
 
