@@ -3,6 +3,7 @@ asyncpg==0.29.0
 python-dotenv==1.2.2
 boto3==1.35.0
 aiohttp==3.13.4
+cryptography==46.0.7
 requests==2.34.2
 google-re2==1.1.20251105
 pytest==9.0.3

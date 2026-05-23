@@ -109,14 +109,43 @@ def _hash_subject(subject: str, salt: bytes) -> str:
     return hmac.new(salt, normalized.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _decode_salt(hex_salt: str | None) -> bytes:
-    """Decode the hex-encoded HMAC salt returned by the backend.
+def _decode_salt(data: dict | str | None) -> bytes:
+    """Decode the HMAC salt returned by the backend.
+
+    F-17: prefers `subject_hash_salt_enc` (Fernet-encrypted via shared-secret-
+    derived key). Falls back to plaintext `subject_hash_salt` during the
+    rolling-deploy window where backend may still be on the old build.
+
+    Accepts either the full /internal/rules response dict (preferred) or, for
+    backwards-compat with callers that already extracted a hex string, the
+    string itself.
 
     Fail closed: if the backend didn't return a salt (legacy code path,
     rolling deploy, etc.) we use the all-zero salt rather than crash.
     Hashes computed this way are still unique per subject but lose the
     cross-customer privacy property until the backend catches up.
     """
+    if data is None:
+        return b"\x00" * 32
+
+    # Caller passed the full response dict — preferred F-17 path.
+    if isinstance(data, dict):
+        enc = data.get("subject_hash_salt_enc")
+        if enc:
+            try:
+                from internal_crypto import decrypt_field, InvalidToken
+                hex_bytes = decrypt_field(enc)
+                return bytes.fromhex(hex_bytes.decode("ascii"))
+            except (InvalidToken, ValueError) as exc:
+                logger.error(
+                    "subject_hash_salt_enc failed to decrypt; "
+                    "falling back to plaintext field if present",
+                    extra={"error": str(exc)},
+                )
+        hex_salt = data.get("subject_hash_salt")
+    else:
+        hex_salt = data
+
     if not hex_salt:
         return b"\x00" * 32
     try:
@@ -658,7 +687,7 @@ class SafeSenderHandler:
             if data:
                 recipient = rcpt_tos[0] if rcpt_tos else ""
                 msg = email_lib.message_from_bytes(raw_content, policy=email_policy.default)
-                _salt = _decode_salt(data.get("subject_hash_salt"))
+                _salt = _decode_salt(data)
                 subject_hash = _hash_subject(str(msg.get("Subject", "")), _salt)
                 await _log_scan(
                     customer_id=data["customer_id"],
@@ -689,7 +718,7 @@ class SafeSenderHandler:
 
         customer_id: str = data["customer_id"]
         rules: list[dict] = data.get("rules", [])
-        subject_hash_salt: bytes = _decode_salt(data.get("subject_hash_salt"))
+        subject_hash_salt: bytes = _decode_salt(data)
 
         # --- 2. Rate limiting ---
         if not _rate_limiter.is_allowed(customer_id):
