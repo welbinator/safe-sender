@@ -288,6 +288,13 @@ class RateLimiter:
     """
     Sliding-window rate limiter keyed by customer_id.
     Thread-safe via asyncio (single-threaded event loop).
+
+    S-M6: this in-memory implementation is per-process (lost on crash, not
+    shared across SMTP replicas). Production should prefer
+    ``RedisRateLimiter`` when ``REDIS_URL`` is set — selected automatically
+    by :func:`_make_rate_limiter`. The in-memory variant remains as the
+    fallback for single-node dev/test and as a safety net if Redis becomes
+    unreachable at runtime.
     """
     def __init__(self, max_count: int, window_seconds: int):
         self.max_count = max_count
@@ -295,7 +302,7 @@ class RateLimiter:
         # customer_id -> deque of timestamps
         self._buckets: dict[str, collections.deque] = {}
 
-    def is_allowed(self, customer_id: str, cost: int = 1) -> bool:
+    def _is_allowed_sync(self, customer_id: str, cost: int = 1) -> bool:
         """Charge `cost` tokens (= number of recipients) against the bucket.
 
         S-M5: per-message accounting let an attacker amplify by stuffing 100
@@ -319,14 +326,149 @@ class RateLimiter:
             bucket.append(now)
         return True
 
-    def current_count(self, customer_id: str) -> int:
+    def _current_count_sync(self, customer_id: str) -> int:
         now = time.monotonic()
         bucket = self._buckets.get(customer_id, collections.deque())
         cutoff = now - self.window
         return sum(1 for t in bucket if t >= cutoff)
 
+    async def is_allowed(self, customer_id: str, cost: int = 1) -> bool:
+        return self._is_allowed_sync(customer_id, cost)
 
-_rate_limiter = RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
+    async def current_count(self, customer_id: str) -> int:
+        return self._current_count_sync(customer_id)
+
+
+# S-M6 — Atomic sliding-window check via Redis sorted sets.
+#
+# The window is stored as a ZSET keyed by ``ratelimit:{customer_id}`` whose
+# members are unique event IDs and whose scores are wall-clock microseconds.
+# A single Lua script (a) drops timestamps older than ``now - window``,
+# (b) counts what's left, (c) refuses if ``count + cost > max``, otherwise
+# (d) inserts ``cost`` fresh members and refreshes TTL. Executing as Lua
+# means the read-modify-write happens server-side under Redis's
+# single-threaded execution model — no TOCTOU between two SMTP replicas.
+#
+# Failure mode: any Redis error falls back to the in-memory limiter so a
+# Redis outage degrades to single-process limiting rather than open-fail.
+_REDIS_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local max_count = tonumber(ARGV[3])
+local cost = tonumber(ARGV[4])
+local cutoff = now - (window * 1000000)
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+local current = redis.call('ZCARD', key)
+if current + cost > max_count then
+  return {0, current}
+end
+for i = 1, cost do
+  redis.call('ZADD', key, now, now .. '-' .. i .. '-' .. math.random(1, 1000000000))
+end
+redis.call('EXPIRE', key, window + 1)
+return {1, current + cost}
+"""
+
+_REDIS_COUNT_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local cutoff = now - (window * 1000000)
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+return redis.call('ZCARD', key)
+"""
+
+
+class RedisRateLimiter:
+    """Distributed sliding-window limiter using redis.asyncio + Lua atomicity.
+
+    Falls back to a shared in-memory ``RateLimiter`` on any Redis exception
+    so the SMTP server keeps enforcing limits even during Redis incidents.
+    """
+
+    def __init__(self, redis_url: str, max_count: int, window_seconds: int,
+                 fallback: "RateLimiter") -> None:
+        # Import lazily so the test suite — which mocks the whole module —
+        # doesn't need redis installed in every environment.
+        from redis import asyncio as _aredis  # type: ignore
+        self._client = _aredis.from_url(
+            redis_url,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+            decode_responses=True,
+        )
+        self.max_count = max_count
+        self.window = window_seconds
+        self._fallback = fallback
+        self._allow_sha: str | None = None
+        self._count_sha: str | None = None
+
+    async def _ensure_scripts(self) -> None:
+        if self._allow_sha is None:
+            self._allow_sha = await self._client.script_load(_REDIS_LUA)
+        if self._count_sha is None:
+            self._count_sha = await self._client.script_load(_REDIS_COUNT_LUA)
+
+    async def is_allowed(self, customer_id: str, cost: int = 1) -> bool:
+        if cost < 1:
+            cost = 1
+        try:
+            await self._ensure_scripts()
+            now_us = int(time.time() * 1_000_000)
+            result = await self._client.evalsha(
+                self._allow_sha, 1,
+                f"ratelimit:{customer_id}",
+                now_us, self.window, self.max_count, cost,
+            )
+            return int(result[0]) == 1
+        except Exception as exc:  # noqa: BLE001 — defensive fallback
+            logger.warning(
+                "Redis rate-limit check failed; falling back to in-memory",
+                extra={"error": str(exc), "customer_id": customer_id},
+            )
+            return self._fallback._is_allowed_sync(customer_id, cost)
+
+    async def current_count(self, customer_id: str) -> int:
+        try:
+            await self._ensure_scripts()
+            now_us = int(time.time() * 1_000_000)
+            result = await self._client.evalsha(
+                self._count_sha, 1,
+                f"ratelimit:{customer_id}",
+                now_us, self.window,
+            )
+            return int(result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Redis rate-limit count failed; falling back to in-memory",
+                extra={"error": str(exc), "customer_id": customer_id},
+            )
+            return self._fallback._current_count_sync(customer_id)
+
+
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
+
+
+def _make_rate_limiter() -> "RateLimiter | RedisRateLimiter":
+    """Pick the distributed limiter when REDIS_URL is set; otherwise in-memory."""
+    memory = RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
+    if not REDIS_URL:
+        logger.info("Rate limiter: in-memory (REDIS_URL unset)")
+        return memory
+    try:
+        rl = RedisRateLimiter(REDIS_URL, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, memory)
+        logger.info("Rate limiter: redis (sliding window, atomic via Lua)")
+        return rl
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Failed to initialise RedisRateLimiter; using in-memory fallback",
+            extra={"error": str(exc)},
+        )
+        return memory
+
+
+_rate_limiter = _make_rate_limiter()
 
 # ---------------------------------------------------------------------------
 # Admin alerting (circuit breaker — only one alert per cooldown period)
@@ -1074,8 +1216,8 @@ class SafeSenderHandler:
 
         # --- 2. Rate limiting (S-M5: cost = recipient count) ---
         rcpt_cost = max(1, len(rcpt_tos))
-        if not _rate_limiter.is_allowed(customer_id, cost=rcpt_cost):
-            count = _rate_limiter.current_count(customer_id)
+        if not await _rate_limiter.is_allowed(customer_id, cost=rcpt_cost):
+            count = await _rate_limiter.current_count(customer_id)
             logger.warning(
                 "Rate limit exceeded",
                 extra={"customer_id": customer_id, "domain": domain, "count": count},
