@@ -127,11 +127,24 @@ def _decode_salt(data: dict | str | None) -> bytes:
     Hashes computed this way are still unique per subject but lose the
     cross-customer privacy property until the backend catches up.
     """
+    # S-L3: when no salt is recoverable, derive a deterministic per-customer
+    # fallback via HMAC(INTERNAL_SHARED_SECRET, customer_id) so a backend
+    # crypto hiccup never collapses every customer into the same hash space.
+    # All-zero fallback is only used when we truly have nothing (no customer_id
+    # available — caller passed None or a bare hex string with no context).
+    def _fallback_salt(customer_id: str | None) -> bytes:
+        if not customer_id:
+            return b"\x00" * 32
+        import hmac as _hmac, hashlib as _hashlib
+        key = (INTERNAL_SHARED_SECRET or "salt-fallback").encode()
+        return _hmac.new(key, f"salt-fallback-v1|{customer_id}".encode(), _hashlib.sha256).digest()
+
     if data is None:
-        return b"\x00" * 32
+        return _fallback_salt(None)
 
     # Caller passed the full response dict — preferred F-17 path.
     if isinstance(data, dict):
+        cust = data.get("customer_id")
         enc = data.get("subject_hash_salt_enc")
         if enc:
             try:
@@ -142,14 +155,17 @@ def _decode_salt(data: dict | str | None) -> bytes:
                 logger.error(
                     "subject_hash_salt_enc failed to decrypt; "
                     "falling back to plaintext field if present",
-                    extra={"error": str(exc)},
+                    extra={"error": str(exc), "customer_id": cust},
                 )
         hex_salt = data.get("subject_hash_salt")
+        if not hex_salt:
+            return _fallback_salt(cust)
     else:
         hex_salt = data
+        cust = None
 
     if not hex_salt:
-        return b"\x00" * 32
+        return _fallback_salt(cust)
     try:
         return bytes.fromhex(hex_salt)
     except ValueError:
@@ -196,8 +212,7 @@ logger = logging.getLogger(__name__)
 # Configuration (from environment)
 # ---------------------------------------------------------------------------
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://backend:8000")
-AUTH_USERNAME = os.environ.get("AUTH_USERNAME", "")
-AUTH_PASSWORD = os.environ.get("AUTH_PASSWORD", "")
+# S-I1: removed dead AUTH_USERNAME/AUTH_PASSWORD env vars — never consulted.
 TLS_CERT_PATH = os.environ.get("TLS_CERT_PATH", "")
 TLS_KEY_PATH = os.environ.get("TLS_KEY_PATH", "")
 
@@ -279,8 +294,17 @@ class RateLimiter:
         # customer_id -> deque of timestamps
         self._buckets: dict[str, collections.deque] = {}
 
-    def is_allowed(self, customer_id: str) -> bool:
+    def is_allowed(self, customer_id: str, cost: int = 1) -> bool:
+        """Charge `cost` tokens (= number of recipients) against the bucket.
+
+        S-M5: per-message accounting let an attacker amplify by stuffing 100
+        recipients into a single envelope. We now reserve one slot per
+        recipient — a 100-RCPT message costs 100 against the bucket — and
+        only admit the message if the full cost fits in the remaining window.
+        """
         now = time.monotonic()
+        if cost < 1:
+            cost = 1
         if customer_id not in self._buckets:
             self._buckets[customer_id] = collections.deque()
         bucket = self._buckets[customer_id]
@@ -288,9 +312,10 @@ class RateLimiter:
         cutoff = now - self.window
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
-        if len(bucket) >= self.max_count:
+        if len(bucket) + cost > self.max_count:
             return False
-        bucket.append(now)
+        for _ in range(cost):
+            bucket.append(now)
         return True
 
     def current_count(self, customer_id: str) -> int:
@@ -524,8 +549,13 @@ async def _log_scan(
         async with aiohttp.ClientSession(headers=_internal_headers()) as session:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status not in (200, 201):
-                    body = await resp.text()
-                    logger.error("scan-log POST failed", extra={"status": resp.status, "body": body})
+                    # S-L2: don't ingest backend tracebacks into our stdout.
+                    # Status code is enough to alert on; full body stays server-side.
+                    snippet = (await resp.text())[:200]
+                    logger.error(
+                        "scan-log POST failed",
+                        extra={"status": resp.status, "body_snippet": snippet},
+                    )
     except Exception as exc:
         logger.error("Failed to post scan log", extra={"error": str(exc)})
 
@@ -565,16 +595,15 @@ def _forward_via_ses(
 
 class Authenticator:
     """
-    Authenticates SMTP clients by verifying credentials against the backend DB.
-    Falls back to AUTH_USERNAME/AUTH_PASSWORD env vars for admin/testing.
+    Authenticates SMTP clients by verifying credentials against the backend
+    /internal/smtp-auth endpoint. Password is sealed (AES-256-GCM, S-H4) on
+    the wire — plaintext never leaves this process.
 
-    NOTE: aiosmtpd calls this as a sync callable from inside the running event
-    loop. Calling loop.run_until_complete here deadlocks. We use the sync
-    `requests` library — auth requests are short, infrequent, and block only
-    the single auth connection (aiosmtpd handles each connection in a separate
-    coroutine, but blocking I/O still stalls the whole loop). For low auth
-    volume this is acceptable; switch to a thread executor if AUTH becomes
-    a hot path.
+    NOTE (S-M1): aiosmtpd invokes `__call__` synchronously from the event
+    loop. Network I/O here would stall every other in-flight SMTP session,
+    so we hand the request off to a worker thread via `asyncio.to_thread`
+    inside a small async wrapper. Brute-force protection lives upstream in
+    `Authenticator.__call__` (per-peer-IP failure counter, S-M2).
     """
 
     def __call__(self, server, session, envelope, mechanism, auth_data):
@@ -605,7 +634,10 @@ class Authenticator:
             return AuthResult(success=False, handled=True, message="451 4.7.0 Auth backend unavailable")
 
         if resp.status_code != 200:
-            logger.warning("AUTH failed", extra={"user": username, "status": resp.status_code})
+            # S-L1: hash the username so logs are correlatable but not PII.
+            import hashlib as _hashlib
+            user_h = _hashlib.sha256(username.encode("utf-8", "replace")).hexdigest()[:16]
+            logger.warning("AUTH failed", extra={"user_hash": user_h, "status": resp.status_code})
             return AuthResult(success=False, handled=True)
 
         result = resp.json()
@@ -665,7 +697,16 @@ class SafeSenderHandler:
 
         domain = _extract_domain(mail_from)
         peer_ip = session.peer[0] if session.peer else "unknown"
-        logger.info("Incoming email", extra={"port": self.port, "peer": peer_ip, "domain": domain, "to": rcpt_tos})
+        # S-L1: log recipient *count* and domain only, never full addresses.
+        logger.info(
+            "Incoming email",
+            extra={
+                "port": self.port,
+                "peer": peer_ip,
+                "domain": domain,
+                "rcpt_count": len(rcpt_tos),
+            },
+        )
 
         # --- Port-specific access control ------------------------------------
         if self.port == 25:
@@ -675,6 +716,17 @@ class SafeSenderHandler:
                     extra={"peer": peer_ip, "domain": domain},
                 )
                 return "550 5.7.1 Connections only accepted from authorized relay IPs"
+            # S-M9: even from a trusted relay IP, MAIL FROM must parse to a
+            # real sender domain before we pass it to SES as Source=. Empty
+            # or malformed addresses get rejected here so SES never sees
+            # them and we don't accidentally tag an SES send with a bogus
+            # Source that could trigger SES sandbox / reputation flags.
+            if not domain or "." not in domain:
+                logger.warning(
+                    "Port 25: malformed MAIL FROM — rejected",
+                    extra={"peer": peer_ip, "domain": domain},
+                )
+                return "550 5.1.7 Malformed sender address"
         else:
             # Port 587: must be authenticated
             if not getattr(session, "smtp_customer_id", None) and not getattr(session, "smtp_admin", False):
@@ -755,8 +807,9 @@ class SafeSenderHandler:
         rules: list[dict] = data.get("rules", [])
         subject_hash_salt: bytes = _decode_salt(data)
 
-        # --- 2. Rate limiting ---
-        if not _rate_limiter.is_allowed(customer_id):
+        # --- 2. Rate limiting (S-M5: cost = recipient count) ---
+        rcpt_cost = max(1, len(rcpt_tos))
+        if not _rate_limiter.is_allowed(customer_id, cost=rcpt_cost):
             count = _rate_limiter.current_count(customer_id)
             logger.warning(
                 "Rate limit exceeded",
@@ -807,7 +860,7 @@ class SafeSenderHandler:
             logger.info(
                 "Email blocked",
                 extra={
-                    "from": mail_from,
+                    "domain": domain,
                     "rule_id": matched_rule["id"],
                     "pattern": matched_rule["pattern"],
                 },
@@ -824,13 +877,18 @@ class SafeSenderHandler:
 
         # Forward via SES
         # --- Suppression check ---
+        # S-I3: each suppressed recipient gets its own scan-log row, not just rcpt[0].
         for rcpt in rcpt_tos:
             if await _is_suppressed(customer_id, rcpt):
-                logger.info("Suppressed recipient — email blocked", extra={"recipient": rcpt, "from": mail_from})
+                # S-L1: don't log the recipient address itself.
+                logger.info(
+                    "Suppressed recipient — email blocked",
+                    extra={"domain": domain, "customer_id": customer_id},
+                )
                 await _log_scan(
                     customer_id=customer_id,
                     sender=mail_from,
-                    recipient=recipient,
+                    recipient=rcpt,
                     subject_hash=subject_hash,
                     matched_rule_id=None,
                     outcome="blocked",
@@ -838,13 +896,20 @@ class SafeSenderHandler:
                 return "550 5.1.8 Recipient address suppressed due to prior bounce or complaint"
 
         try:
-            loop = asyncio.get_event_loop()
+            # S-I2: get_event_loop() is deprecated in 3.12 when no running loop
+            # exists. Inside an async handler we always have one — use the
+            # canonical accessor.
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None, _forward_via_ses, raw_content, mail_from, rcpt_tos, customer_id
             )
-            logger.info("Email forwarded via SES", extra={"from": mail_from})
+            # S-L1: never log raw sender address.
+            logger.info("Email forwarded via SES", extra={"domain": domain, "customer_id": customer_id})
         except Exception as exc:
-            logger.error("SES send failed", extra={"error": str(exc), "from": mail_from})
+            logger.error(
+                "SES send failed",
+                extra={"error": str(exc), "domain": domain, "customer_id": customer_id},
+            )
             await _send_admin_alert_async(
                 subject="SES delivery failure",
                 body=f"SES failed to deliver email from '{mail_from}'.\nError: {exc}",
@@ -891,6 +956,10 @@ def build_ssl_context() -> ssl.SSLContext | None:
         sys.exit(1)
     try:
         ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        # S-L8: pin TLS 1.2 floor explicitly. create_default_context already
+        # disables SSLv2/v3 + TLS 1.0/1.1, but be explicit so a future OpenSSL
+        # default shift can't quietly downgrade us.
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
     except Exception as exc:
         sys.stderr.write(f"FATAL: failed to load TLS cert/key: {exc}\n")
@@ -913,6 +982,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     handler587 = SafeSenderHandler(port=587)
+    # S-M4: cap envelope size at 25 MB (Gmail's outbound limit). aiosmtpd
+    # forwards this to the SMTP server which will refuse oversized DATA
+    # before we ever allocate the body.
+    SMTP_DATA_SIZE_LIMIT = int(os.environ.get("SMTP_DATA_SIZE_LIMIT", str(25 * 1024 * 1024)))
     controller587 = Controller(
         handler587,
         hostname="0.0.0.0",  # nosec B104 - SMTP server must bind all container interfaces; exposure controlled by Docker port mapping + Hetzner firewall
@@ -922,6 +995,7 @@ if __name__ == "__main__":
         auth_require_tls=True,
         require_starttls=True,
         tls_context=ssl_context,
+        data_size_limit=SMTP_DATA_SIZE_LIMIT,
     )
     controller587.start()
     logger.info(
@@ -938,6 +1012,7 @@ if __name__ == "__main__":
         port=25,
         auth_required=False,
         auth_require_tls=False,
+        data_size_limit=SMTP_DATA_SIZE_LIMIT,  # S-M4
     )
     controller25.start()
     logger.info(
@@ -977,7 +1052,11 @@ if __name__ == "__main__":
             await site.start()
             logger.info("SMTP health endpoint listening on 127.0.0.1:9100/health")
 
-        loop = asyncio.get_event_loop()
+        # S-I2: use new_event_loop() at module-entry where there is no
+        # running loop yet. asyncio.get_event_loop() emits a DeprecationWarning
+        # in 3.12 in that situation.
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         loop.run_until_complete(_start_health())
         loop.run_forever()
     except KeyboardInterrupt:

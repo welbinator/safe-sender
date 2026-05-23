@@ -1,0 +1,63 @@
+# S-L7: keep the SMTP image build context minimal — no secrets, no dev cruft,
+# no test fixtures. If you need something in the image, add it explicitly.
+
+# VCS / IDE
+.git
+.gitignore
+.gitattributes
+.github
+.idea
+.vscode
+*.swp
+*.swo
+
+# Python build/runtime junk
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg
+
+# Virtualenvs (must never land in the image)
+venv/
+.venv/
+env/
+ENV/
+
+# Secrets / env files (must never land in the image)
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+secrets.*
+
+# Tests + docs (image is runtime-only)
+tests/
+test_*.py
+*_test.py
+README*
+CHANGELOG*
+docs/
+
+# Local dev artifacts
+*.log
+*.sqlite
+*.sqlite3
+.DS_Store
+
+# Don't shadow Dockerfile/.dockerignore themselves
+!Dockerfile
+!.dockerignore

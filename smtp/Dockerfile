@@ -1,4 +1,8 @@
-FROM python:3.12-slim
+# S-L6: pin base image by digest so a future python:3.12-slim re-tag can't
+# silently introduce a new userland/OpenSSL into prod. To bump: run
+#   docker pull python:3.12-slim && docker inspect --format '{{index .RepoDigests 0}}' python:3.12-slim
+# and replace the digest below. Last bumped 2026-05 -> python:3.12-slim.
+FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203
 
 WORKDIR /app
 
