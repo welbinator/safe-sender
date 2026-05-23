@@ -16,7 +16,7 @@ An email filtering service that scans incoming SMTP traffic against per-customer
 ```bash
 cp .env.example .env
 # edit .env — set a real POSTGRES_PASSWORD
-docker compose up -d
+docker compose up -d --build
 curl http://localhost/health   # → {"status": "ok"}
 ```
 
