@@ -6,12 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sender Safety</title>
     <!--
-      Sprint B C14: Google Identity Services loaded statically here, NOT
-      injected from JS. CSP forbids inline/eval; only declared origins on
-      script-src can load. Keeping the tag in HTML lets the browser fetch
-      it during initial document parse — faster + auditable.
+      F-57: GIS popup removed. Sign-in uses a server-side OAuth redirect
+      (plain <a href="/api/auth/google/start">). No 3rd-party scripts here —
+      lets CSP drop accounts.google.com from script-src and gstatic.com from
+      style-src entirely. See backend/routers/auth.py for the flow.
     -->
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
   </head>
   <body>
     <div id="root"></div>

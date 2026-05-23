@@ -95,7 +95,10 @@ api.interceptors.response.use(
 
 export default api;
 
-export const authGoogle = (idToken) => api.post('/auth/google', { id_token: idToken });
+// F-57: authGoogle (POST /auth/google) removed from the API surface. The
+// dashboard now uses the server-side OAuth redirect flow — sign-in is a plain
+// <a href="/api/auth/google/start"> in Login.jsx. The backend POST endpoint
+// is kept one release as a deprecation cushion but no SPA code calls it.
 export const authLogout = () => api.post('/auth/logout');
 export const getMe = () => api.get('/customers/me');
 export const getRules = () => api.get('/rules');
