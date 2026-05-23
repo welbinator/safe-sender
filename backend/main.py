@@ -445,8 +445,16 @@ async def check_suppressed(customer_id: str, email: str):
 # ---------------------------------------------------------------------------
 
 class SmtpAuthRequest(BaseModel):
+    """
+    S-H4: wire format for /internal/smtp-auth.
+
+    The password is delivered as an AES-256-GCM blob (`auth_blob`) keyed off
+    `INTERNAL_SHARED_SECRET` via HKDF. The blob carries a unix timestamp so
+    the backend can reject replays older than `MAX_AGE_SECONDS`.
+    """
+    v: int = 1
     username: str
-    password: str
+    auth_blob: str
 
 
 # H-3: precomputed bcrypt hash of a random secret, used as a "dummy verify"
@@ -470,7 +478,18 @@ async def smtp_auth(body: SmtpAuthRequest):
     Body is POSTed (not query params) so credentials never appear in access logs.
     """
     username = body.username
-    password = body.password
+    # S-H4: decrypt the AES-GCM-sealed password blob. open_password() enforces
+    # AAD (binds username + version), MAC, and a 60s freshness window. Any
+    # failure is treated as an auth failure (no user-visible distinction).
+    from security.internal_auth_crypto import open_password as _open_password
+    try:
+        password = _open_password(username, body.auth_blob)
+    except ValueError as exc:
+        logger.warning("smtp-auth: rejected sealed payload", extra={"reason": str(exc)})
+        # Still pay the bcrypt cost to keep timing flat with the success path.
+        import bcrypt as _bcrypt
+        await asyncio.to_thread(_bcrypt.checkpw, b"x" * 16, _DUMMY_BCRYPT_HASH)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # ------------------------------------------------------------------
     # H-3: Admin/test fallback — constant-time + bcrypt-equivalent timing.

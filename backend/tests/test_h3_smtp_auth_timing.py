@@ -38,9 +38,12 @@ def _internal_secret() -> str:
 
 
 def _post(client, username: str, password: str):
+    # S-H4: backend expects AES-GCM-sealed password blob.
+    from security.internal_auth_crypto import seal_password, WIRE_VERSION
+    auth_blob = seal_password(username, password)
     return client.post(
         "/internal/smtp-auth",
-        json={"username": username, "password": password},
+        json={"v": WIRE_VERSION, "username": username, "auth_blob": auth_blob},
         headers={INTERNAL_HEADER: _internal_secret()},
     )
 

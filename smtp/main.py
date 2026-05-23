@@ -39,6 +39,8 @@ from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
 from botocore.config import Config as BotoConfig
 
+from internal_auth_crypto import WIRE_VERSION, seal_password
+
 # google-re2 — RE2 has linear-time guarantees and is immune to ReDoS.
 # Used for all customer-supplied regex patterns. Stdlib re is unsafe here
 # because a single malicious pattern can pin the worker forever (Sprint B C9/H2).
@@ -581,10 +583,20 @@ class Authenticator:
         username = auth_data.login.decode() if isinstance(auth_data.login, bytes) else auth_data.login
         password = auth_data.password.decode() if isinstance(auth_data.password, bytes) else auth_data.password
 
+        # S-H4: seal the password with AES-256-GCM (key derived from
+        # INTERNAL_SHARED_SECRET via HKDF). Plaintext password never crosses
+        # the docker network. AAD binds the username + wire version, so an
+        # intercepted blob cannot be replayed against a different user.
+        try:
+            auth_blob = seal_password(username, password)
+        except Exception as exc:
+            logger.error("Failed to seal SMTP auth payload", extra={"error": str(exc)})
+            return AuthResult(success=False, handled=True, message="451 4.7.0 Auth backend unavailable")
+
         try:
             resp = requests.post(
                 f"{BACKEND_URL}/internal/smtp-auth",  # nosemgrep: python.lang.security.audit.insecure-transport.requests.request-with-http.request-with-http
-                json={"username": username, "password": password},
+                json={"v": WIRE_VERSION, "username": username, "auth_blob": auth_blob},
                 headers=_INTERNAL_HEADERS,
                 timeout=5,
             )
