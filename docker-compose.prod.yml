@@ -68,8 +68,9 @@ services:
       - backend
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ${SSL_CERT_PATH}:/etc/ssl/certs/fullchain.pem:ro
-      - ${SSL_KEY_PATH}:/etc/ssl/private/privkey.pem:ro
+      # nginx.conf references /etc/letsencrypt/live/... paths directly,
+      # so we bind-mount the whole letsencrypt dir read-only.
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: always
 
 volumes:
