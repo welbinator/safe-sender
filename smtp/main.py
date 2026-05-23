@@ -36,7 +36,8 @@ import aiohttp
 import boto3
 import requests
 from aiosmtpd.controller import Controller
-from aiosmtpd.smtp import AuthResult, LoginPassword
+from aiosmtpd.smtp import SMTP as SMTPServer, AuthResult, LoginPassword, MISSING
+from base64 import b64decode
 from botocore.config import Config as BotoConfig
 
 from internal_auth_crypto import WIRE_VERSION, seal_password, verify_test_token
@@ -593,58 +594,322 @@ def _forward_via_ses(
 # Authenticator
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Brute-force tracker (S-M2)
+# ---------------------------------------------------------------------------
+#
+# Per-peer-IP failure counter with exponential backoff and temporary ban.
+# Counter resets on a successful AUTH from that peer. State is in-memory
+# (one process per SMTP container today); a Redis-backed implementation
+# can replace this without touching call sites (S-M6 will generalize the
+# rate-limit pattern).
+#
+# Defaults: after the 5th consecutive failure we start applying backoff
+# (1s, 2s, 4s, 8s, 16s, ...) up to BRUTE_BACKOFF_MAX_SECONDS, and after
+# BRUTE_BAN_THRESHOLD failures we reject AUTH outright for BRUTE_BAN_SECONDS.
+#
+# IP allow/deny list (S-M7) also lives here so the connect-time gate has a
+# single source of truth.
+
+BRUTE_BACKOFF_START = int(os.environ.get("BRUTE_BACKOFF_START", "5"))
+BRUTE_BACKOFF_MAX_SECONDS = int(os.environ.get("BRUTE_BACKOFF_MAX_SECONDS", "30"))
+BRUTE_BAN_THRESHOLD = int(os.environ.get("BRUTE_BAN_THRESHOLD", "20"))
+BRUTE_BAN_SECONDS = int(os.environ.get("BRUTE_BAN_SECONDS", "900"))  # 15 min
+
+
+class BruteForceTracker:
+    """
+    Tracks failed AUTH attempts per peer IP. Thread-safe under asyncio
+    (single-threaded event loop) and across handler tasks.
+    """
+    def __init__(self):
+        # ip -> {"fails": int, "banned_until": float}
+        self._state: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def banned_until(self, ip: str) -> float:
+        with self._lock:
+            entry = self._state.get(ip)
+            if not entry:
+                return 0.0
+            ban = entry.get("banned_until", 0.0)
+            if ban and ban <= time.time():
+                # Ban expired — clear it but keep the failure count so a
+                # repeat offender re-enters backoff quickly.
+                entry["banned_until"] = 0.0
+                return 0.0
+            return ban
+
+    def backoff_seconds(self, ip: str) -> float:
+        """How long this peer should wait before its next AUTH attempt."""
+        with self._lock:
+            fails = self._state.get(ip, {}).get("fails", 0)
+        if fails < BRUTE_BACKOFF_START:
+            return 0.0
+        # Exponential: 1s after BACKOFF_START, doubling each failure.
+        delay = float(1 << min(fails - BRUTE_BACKOFF_START, 10))
+        return min(delay, float(BRUTE_BACKOFF_MAX_SECONDS))
+
+    def record_failure(self, ip: str) -> None:
+        with self._lock:
+            entry = self._state.setdefault(ip, {"fails": 0, "banned_until": 0.0})
+            entry["fails"] += 1
+            if entry["fails"] >= BRUTE_BAN_THRESHOLD:
+                entry["banned_until"] = time.time() + BRUTE_BAN_SECONDS
+                logger.warning(
+                    "Peer banned for brute-force AUTH",
+                    extra={"peer": ip, "fails": entry["fails"], "ban_seconds": BRUTE_BAN_SECONDS},
+                )
+
+    def record_success(self, ip: str) -> None:
+        with self._lock:
+            self._state.pop(ip, None)
+
+
+_brute = BruteForceTracker()
+
+
+# ---------------------------------------------------------------------------
+# Connect-time IP ACL (S-M7)
+# ---------------------------------------------------------------------------
+#
+# Optional deny/allow lists evaluated in connection_made() — we close the
+# socket before any SMTP banner is emitted, so attackers don't even learn
+# the server identity. Default allow-list is empty (i.e. allow all);
+# default deny-list is empty. Operators set:
+#   SMTP_DENY_CIDRS="1.2.3.0/24,5.6.0.0/16"
+#   SMTP_ALLOW_CIDRS="" (empty = allow all that aren't denied)
+# Port-25 still has its own allowlist enforced inside handle_DATA — this
+# ACL is a defense-in-depth layer for both ports.
+
+def _parse_cidr_list(raw: str) -> list:
+    out = []
+    for c in (raw or "").split(","):
+        c = c.strip()
+        if not c:
+            continue
+        try:
+            out.append(ipaddress.ip_network(c, strict=False))
+        except ValueError as exc:
+            logger.warning("Ignoring invalid CIDR in ACL", extra={"cidr": c, "error": str(exc)})
+    return out
+
+
+_SMTP_DENY_NETWORKS = _parse_cidr_list(os.environ.get("SMTP_DENY_CIDRS", ""))
+_SMTP_ALLOW_NETWORKS = _parse_cidr_list(os.environ.get("SMTP_ALLOW_CIDRS", ""))
+
+
+def _ip_allowed_by_acl(peer) -> tuple[bool, str]:
+    """
+    Returns (allowed, reason). Reason is for logging only.
+    Allowlist (if set) wins: only listed IPs may connect.
+    Denylist always rejects, even if also in allowlist.
+    """
+    if not peer:
+        return True, "no_peer"
+    try:
+        ip = ipaddress.ip_address(peer[0])
+    except (ValueError, IndexError):
+        # Unknown peer format — don't accidentally close a unix socket etc.
+        return True, "unparseable_peer"
+    for net in _SMTP_DENY_NETWORKS:
+        if ip in net:
+            return False, f"deny:{net}"
+    if _SMTP_ALLOW_NETWORKS:
+        for net in _SMTP_ALLOW_NETWORKS:
+            if ip in net:
+                return True, f"allow:{net}"
+        return False, "not_in_allowlist"
+    if _brute.banned_until(str(ip)) > 0:
+        return False, "brute_force_ban"
+    return True, "default_allow"
+
+
+# ---------------------------------------------------------------------------
+# Authenticator (S-M1, S-M2)
+# ---------------------------------------------------------------------------
+
 class Authenticator:
     """
     Authenticates SMTP clients by verifying credentials against the backend
     /internal/smtp-auth endpoint. Password is sealed (AES-256-GCM, S-H4) on
     the wire — plaintext never leaves this process.
 
-    NOTE (S-M1): aiosmtpd invokes `__call__` synchronously from the event
-    loop. Network I/O here would stall every other in-flight SMTP session,
-    so we hand the request off to a worker thread via `asyncio.to_thread`
-    inside a small async wrapper. Brute-force protection lives upstream in
-    `Authenticator.__call__` (per-peer-IP failure counter, S-M2).
+    S-M1: the heavy lifting (HKDF seal + HTTP call) runs inside
+    `verify_async()`, which uses an aiohttp session so the event loop is
+    never blocked. The aiosmtpd `authenticator` hook is sync, so we expose
+    `__call__` as a thin shim that schedules the coroutine — but the SMTP
+    subclass below (`SafeSenderSMTP`) overrides `auth_PLAIN` / `auth_LOGIN`
+    to await `verify_async()` directly. The sync `__call__` remains for
+    any caller that bypasses our SMTP subclass.
+
+    S-M2: per-peer-IP brute-force protection is enforced here. On failure
+    we record + apply exponential backoff (asyncio.sleep, not blocking).
+    On the BRUTE_BAN_THRESHOLD-th failure the peer is banned for
+    BRUTE_BAN_SECONDS — subsequent AUTH attempts return 535 immediately
+    until the ban expires.
     """
 
-    def __call__(self, server, session, envelope, mechanism, auth_data):
-        if not isinstance(auth_data, LoginPassword):
-            return AuthResult(success=False, handled=True)
-        username = auth_data.login.decode() if isinstance(auth_data.login, bytes) else auth_data.login
-        password = auth_data.password.decode() if isinstance(auth_data.password, bytes) else auth_data.password
+    _BACKEND_TIMEOUT = aiohttp.ClientTimeout(total=5)
 
-        # S-H4: seal the password with AES-256-GCM (key derived from
-        # INTERNAL_SHARED_SECRET via HKDF). Plaintext password never crosses
-        # the docker network. AAD binds the username + wire version, so an
-        # intercepted blob cannot be replayed against a different user.
+    @staticmethod
+    def _decode(value) -> str:
+        return value.decode("utf-8", "replace") if isinstance(value, (bytes, bytearray)) else value
+
+    @staticmethod
+    def _user_hash(username: str) -> str:
+        return hashlib.sha256(username.encode("utf-8", "replace")).hexdigest()[:16]
+
+    async def verify_async(self, session, auth_data) -> AuthResult:
+        peer = getattr(session, "peer", None)
+        peer_ip = peer[0] if peer else "unknown"
+
+        # --- S-M2: pre-check ban + apply backoff -----------------------
+        ban_until = _brute.banned_until(peer_ip)
+        if ban_until > 0:
+            logger.warning(
+                "AUTH rejected — peer is brute-force banned",
+                extra={"peer": peer_ip, "ban_remaining": int(ban_until - time.time())},
+            )
+            return AuthResult(success=False, handled=True, message="535 5.7.8 Too many failed attempts; try again later")
+        delay = _brute.backoff_seconds(peer_ip)
+        if delay > 0:
+            logger.info("AUTH backoff", extra={"peer": peer_ip, "delay_s": delay})
+            await asyncio.sleep(delay)
+
+        if not isinstance(auth_data, LoginPassword):
+            _brute.record_failure(peer_ip)
+            return AuthResult(success=False, handled=True)
+
+        username = self._decode(auth_data.login)
+        password = self._decode(auth_data.password)
+
+        # --- S-H4: seal password ---------------------------------------
         try:
             auth_blob = seal_password(username, password)
         except Exception as exc:
             logger.error("Failed to seal SMTP auth payload", extra={"error": str(exc)})
             return AuthResult(success=False, handled=True, message="451 4.7.0 Auth backend unavailable")
 
+        # --- Backend call (fully async, no event-loop block) -----------
+        url = f"{BACKEND_URL}/internal/smtp-auth"
         try:
-            resp = requests.post(
-                f"{BACKEND_URL}/internal/smtp-auth",  # nosemgrep: python.lang.security.audit.insecure-transport.requests.request-with-http.request-with-http
-                json={"v": WIRE_VERSION, "username": username, "auth_blob": auth_blob},
-                headers=_INTERNAL_HEADERS,
-                timeout=5,
-            )
+            async with aiohttp.ClientSession(headers=_INTERNAL_HEADERS, timeout=self._BACKEND_TIMEOUT) as http:
+                async with http.post(
+                    url,  # nosemgrep: python.lang.security.audit.insecure-transport
+                    json={"v": WIRE_VERSION, "username": username, "auth_blob": auth_blob},
+                ) as resp:
+                    status = resp.status
+                    if status == 200:
+                        result = await resp.json()
+                    else:
+                        result = None
         except Exception as exc:
             logger.error("Auth backend unreachable", extra={"error": str(exc)})
             return AuthResult(success=False, handled=True, message="451 4.7.0 Auth backend unavailable")
 
-        if resp.status_code != 200:
-            # S-L1: hash the username so logs are correlatable but not PII.
-            import hashlib as _hashlib
-            user_h = _hashlib.sha256(username.encode("utf-8", "replace")).hexdigest()[:16]
-            logger.warning("AUTH failed", extra={"user_hash": user_h, "status": resp.status_code})
+        if status != 200 or not isinstance(result, dict):
+            _brute.record_failure(peer_ip)
+            logger.warning(
+                "AUTH failed",
+                extra={"user_hash": self._user_hash(username), "status": status, "peer": peer_ip},
+            )
             return AuthResult(success=False, handled=True)
 
-        result = resp.json()
+        _brute.record_success(peer_ip)
         session.smtp_customer_id = result.get("customer_id")
         session.smtp_domain = result.get("domain")
         session.smtp_admin = result.get("admin", False)
         return AuthResult(success=True)
+
+    def __call__(self, server, session, envelope, mechanism, auth_data):
+        # Legacy sync entrypoint — used only if SafeSenderSMTP isn't in
+        # play. Run the async verify on a fresh loop in a worker thread so
+        # we never block the current event loop.
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+        coro = self.verify_async(session, auth_data)
+        if loop is None or not loop.is_running():
+            return asyncio.run(coro)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+
+
+# ---------------------------------------------------------------------------
+# SMTP subclass: native async auth + connect-time ACL (S-M1, S-M7)
+# ---------------------------------------------------------------------------
+
+class SafeSenderSMTP(SMTPServer):
+    """
+    aiosmtpd ships `_authenticate` as sync — credentials get verified on the
+    event loop. Override `auth_PLAIN` / `auth_LOGIN` so the backend HTTP
+    call can be awaited natively. Also override `connection_made` to drop
+    banned / denylisted peers before the banner is sent.
+    """
+
+    _authenticator: "Authenticator | None"
+
+    def connection_made(self, transport):  # type: ignore[override]
+        peer = transport.get_extra_info("peername") if transport else None
+        allowed, reason = _ip_allowed_by_acl(peer)
+        if not allowed:
+            logger.warning(
+                "Connection rejected by ACL",
+                extra={"peer": peer[0] if peer else "unknown", "reason": reason},
+            )
+            try:
+                transport.close()
+            except Exception:
+                pass
+            return
+        super().connection_made(transport)
+
+    async def auth_PLAIN(self, _, args):  # type: ignore[override]
+        if len(args) == 1:
+            blob = await self.challenge_auth("")
+            if blob is MISSING:
+                return AuthResult(success=False)
+        else:
+            try:
+                blob = b64decode(args[1].encode(), validate=True)
+            except Exception:
+                await self.push("501 5.5.2 Can't decode base64")
+                return AuthResult(success=False, handled=True)
+        try:
+            _, login, password = blob.split(b"\x00")
+        except ValueError:
+            await self.push("501 5.5.2 Can't split auth value")
+            return AuthResult(success=False, handled=True)
+        if self._authenticator is None:
+            return AuthResult(success=False, handled=True)
+        return await self._authenticator.verify_async(self.session, LoginPassword(login, password))
+
+    async def auth_LOGIN(self, _, args):  # type: ignore[override]
+        if len(args) == 1:
+            login = await self.challenge_auth(self.AuthLoginUsernameChallenge)
+            if login is MISSING:
+                return AuthResult(success=False)
+        else:
+            try:
+                login = b64decode(args[1].encode(), validate=True)
+            except Exception:
+                await self.push("501 5.5.2 Can't decode base64")
+                return AuthResult(success=False, handled=True)
+        password = await self.challenge_auth(self.AuthLoginPasswordChallenge)
+        if password is MISSING:
+            return AuthResult(success=False)
+        if self._authenticator is None:
+            return AuthResult(success=False, handled=True)
+        return await self._authenticator.verify_async(self.session, LoginPassword(login, password))
+
+
+class SafeSenderController(Controller):
+    """Controller that produces SafeSenderSMTP instances."""
+    def factory(self):
+        return SafeSenderSMTP(self.handler, **self.SMTP_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -986,7 +1251,7 @@ if __name__ == "__main__":
     # forwards this to the SMTP server which will refuse oversized DATA
     # before we ever allocate the body.
     SMTP_DATA_SIZE_LIMIT = int(os.environ.get("SMTP_DATA_SIZE_LIMIT", str(25 * 1024 * 1024)))
-    controller587 = Controller(
+    controller587 = SafeSenderController(
         handler587,
         hostname="0.0.0.0",  # nosec B104 - SMTP server must bind all container interfaces; exposure controlled by Docker port mapping + Hetzner firewall
         port=587,
@@ -1006,7 +1271,7 @@ if __name__ == "__main__":
     # Port 25 - MTA-to-MTA inbound from Google Workspace SMTP relay.
     # No SMTP-AUTH (peer-IP allowlist enforced inside handle_DATA).
     handler25 = SafeSenderHandler(port=25)
-    controller25 = Controller(
+    controller25 = SafeSenderController(
         handler25,
         hostname="0.0.0.0",  # nosec B104 - SMTP server must bind all container interfaces; exposure controlled by Docker port mapping + Hetzner firewall
         port=25,
