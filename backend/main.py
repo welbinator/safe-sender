@@ -25,6 +25,7 @@ Internal (SMTP service only, not exposed via nginx):
 """
 import asyncio
 import hashlib
+import hmac
 import logging
 import os
 import time as _time
@@ -448,6 +449,18 @@ class SmtpAuthRequest(BaseModel):
     password: str
 
 
+# H-3: precomputed bcrypt hash of a random secret, used as a "dummy verify"
+# target to equalize timing on the admin and unknown-user code paths in
+# /internal/smtp-auth. Generated once at module import.
+def _make_dummy_bcrypt_hash() -> bytes:
+    import bcrypt as _b
+    import secrets as _s
+    return _b.hashpw(_s.token_bytes(16), _b.gensalt(12))
+
+
+_DUMMY_BCRYPT_HASH = _make_dummy_bcrypt_hash()
+
+
 @app.post("/internal/smtp-auth", dependencies=[Depends(require_internal_secret)])
 async def smtp_auth(body: SmtpAuthRequest):
     """
@@ -459,10 +472,46 @@ async def smtp_auth(body: SmtpAuthRequest):
     username = body.username
     password = body.password
 
-    # Admin/test fallback
+    # ------------------------------------------------------------------
+    # H-3: Admin/test fallback — constant-time + bcrypt-equivalent timing.
+    #
+    # Original code did `username == admin_user and password == admin_pass`,
+    # which (a) leaked password length/prefix via Python's short-circuit
+    # string compare, and (b) returned immediately, while the DB+bcrypt
+    # path below takes ~250-500ms. Both gaps gave a remote attacker an
+    # oracle to (i) enumerate the admin username and (ii) brute force the
+    # password byte-by-byte.
+    #
+    # Fix:
+    #   1. Use hmac.compare_digest for byte-level constant-time compare.
+    #   2. Always do *both* compares even when admin_user is empty (dummy
+    #      values), so attackers can't tell whether admin auth is enabled
+    #      from timing.
+    #   3. Always pay an asyncio.to_thread(bcrypt.checkpw) cost on the
+    #      admin path (against a fixed precomputed hash), so the admin
+    #      branch's wall time matches the DB-customer branch.
+    # ------------------------------------------------------------------
+    import bcrypt as _bcrypt
+
     admin_user = os.environ.get("AUTH_USERNAME", "")
     admin_pass = os.environ.get("AUTH_PASSWORD", "")
-    if admin_user and username == admin_user and password == admin_pass:
+
+    # Constant-time compare both fields. If admin isn't configured, compare
+    # against a fixed dummy so the timing profile is identical.
+    cmp_user_a = admin_user.encode("utf-8") if admin_user else b"\x00" * 32
+    cmp_user_b = username.encode("utf-8").ljust(len(cmp_user_a), b"\x00")[: len(cmp_user_a)]
+    cmp_pass_a = admin_pass.encode("utf-8") if admin_pass else b"\x00" * 32
+    cmp_pass_b = password.encode("utf-8").ljust(len(cmp_pass_a), b"\x00")[: len(cmp_pass_a)]
+
+    user_match = hmac.compare_digest(cmp_user_a, cmp_user_b) and bool(admin_user)
+    pass_match = hmac.compare_digest(cmp_pass_a, cmp_pass_b) and bool(admin_pass)
+
+    # Always burn a bcrypt cycle so admin-path timing ≈ DB-path timing.
+    # _DUMMY_BCRYPT_HASH is a precomputed bcrypt hash of a random string;
+    # the actual outcome is discarded.
+    await asyncio.to_thread(_bcrypt.checkpw, b"x" * 16, _DUMMY_BCRYPT_HASH)
+
+    if user_match and pass_match:
         return {"customer_id": None, "domain": None, "admin": True}
 
     pool = get_pool()
@@ -472,9 +521,11 @@ async def smtp_auth(body: SmtpAuthRequest):
             username,
         )
     if not row or not row["smtp_password_hash"]:
+        # Still burn a bcrypt cycle so unknown-user vs wrong-password
+        # have indistinguishable timing.
+        await asyncio.to_thread(_bcrypt.checkpw, b"x" * 16, _DUMMY_BCRYPT_HASH)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    import bcrypt as _bcrypt
     # Sprint C2 (audit F-02): bcrypt.checkpw is CPU-bound (~250-500ms).
     # This endpoint sits on the SMTP auth hot path — every inbound message
     # hits it. Offload to a worker thread so we don't stall the FastAPI
