@@ -31,6 +31,7 @@ import threading
 import time
 import unicodedata
 from email import policy as email_policy
+from email import utils as email_utils
 
 import aiohttp
 import boto3
@@ -566,12 +567,107 @@ async def _send_admin_alert_async(subject: str, body: str, key: str = "default")
 # Helpers
 # ---------------------------------------------------------------------------
 
+_FQDN_RE = _stdlib_re.compile(
+    r"^(?=.{1,253}$)(?!-)[A-Z0-9-]{1,63}(?<!-)(?:\.(?!-)[A-Z0-9-]{1,63}(?<!-))+$",
+    _stdlib_re.IGNORECASE,
+)
+
+
 def _extract_domain(address: str) -> str:
-    """Return the domain part of an email address like 'user@example.com'."""
-    address = address.strip("<>").strip()
-    if "@" in address:
-        return address.split("@", 1)[1].lower()
-    return address.lower()
+    """Return the domain part of an email address, lowercased.
+
+    S-M8 — hardened version. The previous implementation used a raw
+    ``str.split("@", 1)`` which happily accepted multi-@ addresses, addresses
+    with whitespace embedded inside the local-part, addresses whose "domain"
+    was a bare label (``user@localhost``) and quoted local-parts
+    (``"a@b"@evil.com``). Any of those allowed an attacker to spoof the
+    domain the rest of the pipeline (rule lookup, SPF, From-domain bind)
+    operated on. We now:
+
+      * Strip RFC-5321 angle brackets and surrounding whitespace.
+      * Parse via ``email.utils.parseaddr`` so quoted local-parts are honored.
+      * Require exactly one ``@`` outside the (already-parsed) local-part.
+      * Require the domain to match an FQDN (≥1 dot, ≤253 chars, labels
+        ≤63 chars, no leading/trailing hyphen).
+
+    An empty string is returned for inputs that do not satisfy the rules; the
+    caller must treat ``""`` as "reject".
+    """
+    if not address:
+        return ""
+    address = address.strip().strip("<>").strip()
+    if not address:
+        return ""
+    # parseaddr handles quoted local-parts: parseaddr('"a@b"@x.com') -> ('','"a@b"@x.com')
+    _, parsed = email_utils.parseaddr(address)
+    if not parsed or "@" not in parsed:
+        return ""
+    # Split from the right so quoted local-parts containing '@' stay intact.
+    local, _, domain = parsed.rpartition("@")
+    if not local or not domain:
+        return ""
+    domain = domain.lower().rstrip(".")
+    if not _FQDN_RE.match(domain):
+        return ""
+    return domain
+
+
+# ---------------------------------------------------------------------------
+# S-H1 — SPF check for port-25 inbound traffic
+# ---------------------------------------------------------------------------
+#
+# Even with a strict peer-IP allowlist, a trusted relay (e.g. Google's MTA)
+# will happily forward mail with a spoofed MAIL FROM if the upstream tenant
+# is compromised or misconfigured. SPF gives us a per-message check: does
+# the *peer IP we're talking to* appear in the SPF record of the MAIL FROM
+# domain? If the domain publishes SPF and the answer is `fail`, that's a
+# verified forgery and we drop it.
+#
+# Policy:
+#   * `pass`     → allow (logged at INFO).
+#   * `none`     → allow. Domain didn't publish SPF; nothing to verify.
+#   * `neutral`  → allow. Domain explicitly opted out of asserting anything.
+#   * `softfail` → allow but log a warning (some legitimate relays still
+#                  produce softfail; alerting is more useful than rejecting).
+#   * `fail`     → REJECT with 550. This is a verified forgery.
+#   * `temperror`→ allow (fail-open on DNS hiccups; otherwise a flaky
+#                  resolver becomes a DoS vector for legitimate mail).
+#   * `permerror`→ allow but log a warning (domain has a broken SPF record;
+#                  not our job to police that).
+#
+# Setting SPF_ENFORCE=0 disables the check (kill-switch). Default ON in
+# production because the peer-IP allowlist already restricts the surface;
+# SPF is purely defense-in-depth on top of that.
+
+import spf as _spf  # pyspf
+
+SPF_ENFORCE = os.environ.get("SPF_ENFORCE", "1") not in ("0", "false", "False", "")
+
+
+def _check_spf_sync(peer_ip: str, mail_from: str, helo: str) -> tuple[str, str]:
+    """Synchronous SPF lookup. Returns (result, explanation).
+
+    Wrapped via asyncio.to_thread by the async caller so the event loop is
+    never blocked by DNS.
+    """
+    try:
+        result, explanation = _spf.check2(i=peer_ip, s=mail_from, h=helo or "unknown")
+        return str(result or "").lower(), str(explanation or "")
+    except Exception as exc:  # pragma: no cover - defensive
+        return "temperror", f"spf-check raised: {exc}"
+
+
+async def _check_spf(peer_ip: str, mail_from: str, helo: str) -> tuple[str, str]:
+    """Async wrapper around pyspf. Returns ("", "") if SPF_ENFORCE is off."""
+    if not SPF_ENFORCE:
+        return ("", "")
+    if not mail_from or not peer_ip or peer_ip == "unknown":
+        return ("none", "missing peer or sender")
+    try:
+        ipaddress.ip_address(peer_ip)
+    except ValueError:
+        return ("none", "peer not an IP literal")
+    return await asyncio.to_thread(_check_spf_sync, peer_ip, mail_from, helo)
 
 
 def _get_text_body(msg) -> str:
@@ -1134,6 +1230,39 @@ class SafeSenderHandler:
                     extra={"peer": peer_ip, "domain": domain},
                 )
                 return "550 5.1.7 Malformed sender address"
+            # S-H1: SPF check on the MAIL FROM domain. Even though peer_ip
+            # is already on the port-25 allowlist, SPF tells us whether
+            # *this peer* is actually authorized to send for *this domain*.
+            # A `fail` is a verified forgery; everything else is allowed
+            # (with appropriate logging). See helper docstring for policy.
+            helo = getattr(session, "host_name", "") or ""
+            spf_result, spf_reason = await _check_spf(peer_ip, mail_from, helo)
+            if spf_result == "fail":
+                logger.warning(
+                    "Port 25: SPF fail — rejected as spoofed",
+                    extra={
+                        "peer": peer_ip,
+                        "domain": domain,
+                        "spf": spf_result,
+                        "spf_reason": spf_reason,
+                    },
+                )
+                return "550 5.7.23 SPF check failed — sender not authorized"
+            if spf_result in ("softfail", "permerror"):
+                logger.warning(
+                    "Port 25: SPF non-pass (allowed)",
+                    extra={
+                        "peer": peer_ip,
+                        "domain": domain,
+                        "spf": spf_result,
+                        "spf_reason": spf_reason,
+                    },
+                )
+            elif spf_result:
+                logger.info(
+                    "Port 25: SPF check",
+                    extra={"peer": peer_ip, "domain": domain, "spf": spf_result},
+                )
         else:
             # Port 587: must be authenticated
             if not getattr(session, "smtp_customer_id", None) and not getattr(session, "smtp_admin", False):
