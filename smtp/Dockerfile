@@ -12,11 +12,17 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY . .
 
-# Container intentionally runs as root: needs to bind privileged ports 25 and 587.
-# Avoiding root would require either setcap CAP_NET_BIND_SERVICE on the python
-# binary (fragile across Python image updates) or sysctl net.ipv4.ip_unprivileged_port_start=0
-# in compose (which weakens the container's port-binding policy globally). Container is
-# tightly scoped: only listens on SMTP ports, no shell access, no secrets baked in.
-# nosemgrep: dockerfile.security.missing-user.missing-user
-CMD ["python", "main.py"]
+# S-M3 — non-root runtime.
+#
+# We can't `USER app` here because two things must happen as root first:
+#   1. Bind privileged ports 25 and 587.
+#   2. Read the Let's Encrypt private key (0600 root:root) into an SSLContext.
+# Instead we create the unprivileged 'app' account here and main.py calls
+# os.setgid/setuid to drop to it AFTER sockets are bound and TLS material is
+# loaded into memory. This is the classic sshd / postfix / nginx pattern:
+# minimal root window, long-lived process runs unprivileged.
+RUN groupadd --system --gid 10001 app \
+    && useradd  --system --uid 10001 --gid app --home /app --shell /sbin/nologin app \
+    && chown -R app:app /app
 
+CMD ["python", "main.py"]

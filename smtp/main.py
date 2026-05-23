@@ -1205,6 +1205,55 @@ class SafeSenderHandler:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _drop_privileges() -> None:
+    """S-M3 — drop from root to the unprivileged 'app' account.
+
+    Called *after* the SMTP controllers have bound their privileged ports
+    and the TLS SSLContext has loaded the private key into memory. The
+    long-lived asyncio loop then runs as uid/gid 10001 with no ability
+    to re-read /etc/letsencrypt or write to system paths inside the
+    container. If we aren't root we no-op (e.g. local dev, or a future
+    rootless container runtime that already drops us).
+    """
+    import pwd
+
+    if os.geteuid() != 0:
+        logger.info("Privilege drop skipped (not root)", extra={"uid": os.geteuid()})
+        return
+
+    target_user = os.environ.get("SMTP_RUNTIME_USER", "app")
+    try:
+        pw = pwd.getpwnam(target_user)
+    except KeyError:
+        logger.critical(
+            "SMTP_RUNTIME_USER not found; refusing to run as root",
+            extra={"user": target_user},
+        )
+        raise SystemExit(1)
+
+    # Order matters: groups -> gid -> uid. setuid first would lose the
+    # right to setgid.
+    try:
+        os.setgroups([pw.pw_gid])
+    except PermissionError:
+        # Not all containers grant CAP_SETGID for supplementary groups; the
+        # primary gid switch below is what actually matters.
+        pass
+    os.setgid(pw.pw_gid)
+    os.setuid(pw.pw_uid)
+
+    # Defence-in-depth: if any of the calls silently no-op'd we want a
+    # loud failure, not a long-running root process.
+    if os.geteuid() == 0 or os.getegid() == 0:
+        logger.critical("Privilege drop failed; aborting")
+        raise SystemExit(1)
+
+    logger.info(
+        "Dropped privileges",
+        extra={"uid": pw.pw_uid, "gid": pw.pw_gid, "user": target_user},
+    )
+
+
 def build_ssl_context() -> ssl.SSLContext | None:
     """Return an SSL context if TLS cert/key paths are configured.
 
@@ -1284,6 +1333,13 @@ if __name__ == "__main__":
         "Safe Sender SMTP started (port 25, no AUTH, peer-IP allowlist)",
         extra={"port": 25, "allowed_networks": len(_PORT25_NETWORKS)},
     )
+
+    # S-M3 — drop privileges. Sockets 25/587 are bound and the TLS private
+    # key is already loaded into the SSLContext above, so the long-lived
+    # process no longer needs root. We refuse to start if we're somehow
+    # still root after the drop (defence against a misconfigured image).
+    _drop_privileges()
+
 
     try:
         # ------------------------------------------------------------------
