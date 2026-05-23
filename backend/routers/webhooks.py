@@ -42,6 +42,12 @@ _ALLOWED_TOPIC_ARNS = [
     t.strip() for t in os.environ.get("SNS_ALLOWED_TOPIC_ARNS", "").split(",") if t.strip()
 ]
 
+# M-3: asyncio.create_task only holds a *weak* reference to the task — if no
+# strong ref is kept, the task can be garbage-collected mid-flight and the
+# subscription will silently never confirm. Module-level set holds the strong
+# ref until each task finishes; done_callback evicts so it doesn't leak.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
 
 async def _confirm_subscription(subscribe_url: str) -> None:
     """GET the SubscribeURL to confirm the SNS subscription (host pre-validated)."""
@@ -94,7 +100,9 @@ async def ses_webhook(
         except SNSValidationError as exc:
             logger.warning("SubscribeURL rejected", extra={"reason": str(exc)})
             raise HTTPException(status_code=403, detail="SubscribeURL invalid")
-        asyncio.create_task(_confirm_subscription(subscribe_url))
+        task = asyncio.create_task(_confirm_subscription(subscribe_url))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
         return {"status": "confirming"}
 
     if msg_type != "Notification":

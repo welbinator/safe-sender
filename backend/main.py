@@ -31,6 +31,7 @@ import os
 import time as _time
 from typing import Optional
 from urllib.parse import urlparse
+from uuid import UUID
 
 # ---------------------------------------------------------------------------
 # Sprint C1: Fail-fast on missing/weak DATABASE_URL (audit H-3).
@@ -200,7 +201,11 @@ async def startup():
                     database=_u.path.lstrip("/"),
                     min_size=2,
                     max_size=10,
-                    ssl=False,
+                    # M-7: DB SSL is opt-in via DB_SSL=1. Default off keeps
+                    # local dev / docker compose working (no cert on the pg
+                    # container). Prod must set DB_SSL=require (passed
+                    # through to asyncpg) once the managed DB cert is wired.
+                    ssl=os.environ.get("DB_SSL") or False,
                     timeout=10,
                 ),
                 timeout=15,
@@ -366,7 +371,10 @@ async def get_rules(domain: str):
 # ---------------------------------------------------------------------------
 
 class ScanLogRequest(BaseModel):
-    customer_id: str = Field(..., max_length=64)
+    # M-5: parse as UUID so a malformed/oversized string fails at the edge
+    # rather than blowing up the asyncpg cast deep in the handler. Pydantic
+    # coerces strings; max_length stays as a defense-in-depth byte cap.
+    customer_id: UUID
     sender: str = Field(..., max_length=320)        # RFC 5321
     recipient: str = Field(..., max_length=320)
     subject_hash: str = Field(..., max_length=128)  # hex SHA-256
@@ -387,8 +395,46 @@ class ScanLogRequest(BaseModel):
 
 @app.post("/internal/scan-log", status_code=201, dependencies=[Depends(require_internal_secret)])
 async def create_scan_log(body: ScanLogRequest):
-    """Insert a scan log row. Email content is never stored."""
+    """Insert a scan log row. Email content is never stored.
+
+    M-5: enforce sender↔customer binding. The internal-auth shared secret
+    proves the caller is an SMTP worker, NOT that the worker is allowed to
+    log activity for an arbitrary customer. A bug or compromise on one
+    worker shouldn't let it forge logs against every customer's domain.
+    We require the sender's domain to match the customer's registered
+    domain. Default OFF (SCAN_LOG_BIND_SENDER=0) for the rollout window so
+    older payloads keep logging; operator sets =1 once all SMTP workers
+    ship the matched payload shape and the customers.domain column is
+    populated for every active tenant.
+    """
     pool = get_pool()
+    bind_sender = os.environ.get("SCAN_LOG_BIND_SENDER", "0") == "1"
+    if bind_sender:
+        sender_domain = body.sender.rsplit("@", 1)[-1].lower().strip()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT domain FROM customers WHERE id = $1",
+                body.customer_id,
+            )
+        if row is None:
+            logger.warning(
+                "scan_log_unknown_customer",
+                extra={"customer_id": str(body.customer_id)},
+            )
+            raise HTTPException(status_code=404, detail="Unknown customer")
+        if (row["domain"] or "").lower() != sender_domain:
+            logger.warning(
+                "scan_log_sender_customer_mismatch",
+                extra={
+                    "customer_id": str(body.customer_id),
+                    "expected_domain": row["domain"],
+                    "sender_domain": sender_domain,
+                },
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Sender domain does not belong to customer",
+            )
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -421,20 +467,41 @@ async def create_scan_log(body: ScanLogRequest):
     dependencies=[Depends(require_internal_secret)],
 )
 async def check_suppressed(customer_id: str, email: str):
-    """Returns 200 if address is suppressed for this customer, 404 if not."""
+    """Returns 200 if address is suppressed for this customer, 404 if not.
+
+    M-6: legacy NULL-customer_id rows are treated as global suppressions
+    during the backfill window. Once backfill is verified complete, the
+    operator sets SUPPRESSION_LEGACY_NULL=0 to scope strictly to per-tenant
+    rows and eliminate cross-tenant bleed. Default stays ON so we don't
+    silently stop suppressing addresses for tenants whose backfill hasn't
+    landed yet.
+    """
     pool = get_pool()
     addr = email.lower().strip()
+    include_legacy = os.environ.get("SUPPRESSION_LEGACY_NULL", "1") == "1"
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT email FROM suppressed_addresses
-            WHERE email = $1
-              AND (customer_id = $2::uuid OR customer_id IS NULL)
-            LIMIT 1
-            """,
-            addr,
-            customer_id,
-        )
+        if include_legacy:
+            row = await conn.fetchrow(
+                """
+                SELECT email FROM suppressed_addresses
+                WHERE email = $1
+                  AND (customer_id = $2::uuid OR customer_id IS NULL)
+                LIMIT 1
+                """,
+                addr,
+                customer_id,
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT email FROM suppressed_addresses
+                WHERE email = $1
+                  AND customer_id = $2::uuid
+                LIMIT 1
+                """,
+                addr,
+                customer_id,
+            )
     if row:
         return {"suppressed": True}
     raise HTTPException(status_code=404, detail="Not suppressed")

@@ -328,9 +328,21 @@ async def auth_google_callback(
         return _error_redirect("token_exchange_failed")
 
     if tok_resp.status_code != 200:
+        # M-4: don't dump the raw response body — Google sometimes echoes
+        # request fields (including the auth code) into error responses. Parse
+        # JSON and log only the documented OAuth error fields.
+        safe_err = {}
+        try:
+            j = tok_resp.json()
+            if isinstance(j, dict):
+                for k in ("error", "error_description", "error_uri"):
+                    if k in j:
+                        safe_err[k] = str(j[k])[:200]
+        except Exception:
+            safe_err["parse_error"] = "non-json response"
         logger.warning(
             "google_token_exchange_rejected",
-            extra={"status": tok_resp.status_code, "body": tok_resp.text[:500]},
+            extra={"status": tok_resp.status_code, "err": safe_err},
         )
         return _error_redirect("token_exchange_failed")
 
