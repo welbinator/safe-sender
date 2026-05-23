@@ -39,7 +39,7 @@ from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
 from botocore.config import Config as BotoConfig
 
-from internal_auth_crypto import WIRE_VERSION, seal_password
+from internal_auth_crypto import WIRE_VERSION, seal_password, verify_test_token
 
 # google-re2 — RE2 has linear-time guarantees and is immune to ReDoS.
 # Used for all customer-supplied regex patterns. Stdlib re is unsafe here
@@ -690,13 +690,29 @@ class SafeSenderHandler:
                     return "550 5.7.1 Sender domain does not match authenticated account"
 
         # --- Test connection emails: sendersafety-test@<domain> ---
+        # S-H3: bypass requires a valid HMAC token in `X-SenderSafety-TestToken`
+        # minted by the backend. Without it, the message falls through to the
+        # normal scanning path (no free outcome=allowed log injection).
         local_part = mail_from.strip("<>").split("@")[0].lower()
         if local_part == "sendersafety-test":
             try:
                 data = await _fetch_rules(domain)
             except Exception:
                 data = None
+            test_token_valid = False
             if data:
+                try:
+                    msg_for_token = email_lib.message_from_bytes(
+                        raw_content, policy=email_policy.default
+                    )
+                    token = msg_for_token.get("X-SenderSafety-TestToken")
+                    if token:
+                        test_token_valid = verify_test_token(
+                            str(token), str(data["customer_id"])
+                        )
+                except Exception:
+                    test_token_valid = False
+            if data and test_token_valid:
                 recipient = rcpt_tos[0] if rcpt_tos else ""
                 msg = email_lib.message_from_bytes(raw_content, policy=email_policy.default)
                 _salt = _decode_salt(data)
@@ -710,7 +726,14 @@ class SafeSenderHandler:
                     outcome="allowed",
                 )
                 logger.info("Test connection accepted", extra={"domain": domain})
-            return "250 OK"
+                return "250 OK"
+            if data and not test_token_valid:
+                logger.warning(
+                    "sendersafety-test local-part without valid token — "
+                    "falling through to normal scan",
+                    extra={"domain": domain, "peer": peer_ip},
+                )
+            # fall through to normal scan path below
 
         # --- 1. Look up customer + rules ---
         try:

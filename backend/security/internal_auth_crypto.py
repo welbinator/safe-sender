@@ -108,4 +108,92 @@ def open_password(
     return pw
 
 
-__all__ = ["seal_password", "open_password", "WIRE_VERSION", "MAX_AGE_SECONDS"]
+# ---------------------------------------------------------------------------
+# S-H3 — Test-connection token
+# ---------------------------------------------------------------------------
+#
+# The SMTP gateway recognises `sendersafety-test@<domain>` as a test
+# connection and bypasses DLP scanning. Without a signed token, any
+# authenticated customer can use this local-part to inject `outcome=allowed`
+# rows in their scan log and skip all rules. We require an HMAC token in the
+# email subject, minted by the backend with `INTERNAL_SHARED_SECRET`. SMTP
+# verifies before activating the bypass; on any failure the message falls
+# through to normal scanning.
+
+_TEST_TOKEN_INFO = b"sendersafety/test-token/v1"
+TEST_TOKEN_MAX_AGE_SECONDS = 300  # 5 minutes
+
+
+def _derive_test_token_key(shared_secret: str) -> bytes:
+    if not shared_secret:
+        raise ValueError("INTERNAL_SHARED_SECRET is not set")
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=_TEST_TOKEN_INFO,
+    )
+    return hkdf.derive(shared_secret.encode("utf-8"))
+
+
+def mint_test_token(customer_id: str, *, shared_secret: str | None = None) -> str:
+    """Return a base64url token: `<ts>.<hmac>` binding customer_id + ts."""
+    import hmac as _hmac
+    import hashlib
+
+    secret = shared_secret if shared_secret is not None else os.environ.get("INTERNAL_SHARED_SECRET", "")
+    key = _derive_test_token_key(secret)
+    ts = int(time.time())
+    msg = f"{customer_id}|{ts}".encode("utf-8")
+    mac = _hmac.new(key, msg, hashlib.sha256).digest()
+    raw = f"{ts}.".encode("ascii") + base64.urlsafe_b64encode(mac)
+    return raw.decode("ascii")
+
+
+def verify_test_token(
+    token: str,
+    customer_id: str,
+    *,
+    shared_secret: str | None = None,
+    now: int | None = None,
+    max_age_seconds: int = TEST_TOKEN_MAX_AGE_SECONDS,
+) -> bool:
+    """Constant-time verify a token from `mint_test_token`. Never raises."""
+    import hmac as _hmac
+    import hashlib
+
+    try:
+        if not isinstance(token, str) or "." not in token:
+            return False
+        ts_str, mac_b64 = token.split(".", 1)
+        ts = int(ts_str)
+    except Exception:
+        return False
+    current = now if now is not None else int(time.time())
+    if current - ts > max_age_seconds:
+        return False
+    if ts - current > max_age_seconds:
+        return False
+    secret = shared_secret if shared_secret is not None else os.environ.get("INTERNAL_SHARED_SECRET", "")
+    try:
+        key = _derive_test_token_key(secret)
+    except Exception:
+        return False
+    msg = f"{customer_id}|{ts}".encode("utf-8")
+    expected = _hmac.new(key, msg, hashlib.sha256).digest()
+    try:
+        got = base64.urlsafe_b64decode(mac_b64.encode("ascii"))
+    except Exception:
+        return False
+    return _hmac.compare_digest(expected, got)
+
+
+__all__ = [
+    "seal_password",
+    "open_password",
+    "WIRE_VERSION",
+    "MAX_AGE_SECONDS",
+    "mint_test_token",
+    "verify_test_token",
+    "TEST_TOKEN_MAX_AGE_SECONDS",
+]

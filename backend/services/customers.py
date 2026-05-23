@@ -341,6 +341,7 @@ class CustomerService:
                 auth_username,
                 auth_password,
                 test_sender,
+                customer_id,
             )
         except Exception as e:
             return TestConnectionResult(
@@ -376,13 +377,22 @@ class CustomerService:
         auth_username: str,
         auth_password: str,
         sender: str,
+        customer_id: str,
     ) -> None:
+        # S-H3: mint a short-lived HMAC token so the SMTP gateway can verify
+        # this is a legitimate test-connection initiated by the dashboard,
+        # rather than a customer crafting a sendersafety-test@<their-domain>
+        # message to bypass DLP scanning.
+        from security.internal_auth_crypto import mint_test_token
+
+        token = mint_test_token(str(customer_id))
         msg = MIMEText(
             "This is an automated connection test from Sender Safety."
         )
         msg["Subject"] = _TEST_SUBJECT
         msg["From"] = sender
         msg["To"] = _TEST_RECIPIENT
+        msg["X-SenderSafety-TestToken"] = token
 
         with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as smtp:
             smtp.ehlo()
