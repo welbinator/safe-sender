@@ -1,6 +1,12 @@
-"""Pure helpers for SesWebhookService — kept out of the service module so the
-class file stays focused on orchestration and the helpers are independently
-testable.
+"""Pure helpers for MailgunWebhookService — maps Mailgun event payloads to
+(emails, reason, detail, recognized) tuples and extracts customer_id tags.
+
+Mailgun event schema reference:
+  - Bounce:    event="failed", severity="permanent"
+  - Complaint: event="complained"
+  - Tags:      user-variables object keyed by tag name (set via X-Mailgun-Tag header)
+
+UUID regex used for customer_id validation (same as SNS era).
 """
 from __future__ import annotations
 
@@ -15,24 +21,24 @@ _UUID_RE = re.compile(
 )
 
 
-def extract_customer_id_tag(mail: dict[str, Any]) -> Optional[str]:
-    """SES echoes message tags back under `mail.tags.<TagName>` as a list.
+def extract_customer_id_tag(event_data: dict[str, Any]) -> Optional[str]:
+    """Extract customer_id from Mailgun user-variables.
 
-    Returns the UUID string iff the tag is present and well-formed; else None.
+    Mailgun echoes X-Mailgun-Tag as the key in the top-level
+    `user-variables` dict of the event data object.
+
+    Returns the UUID string iff present and well-formed; else None.
     Malformed tags are logged but downgraded to None so we still write a
     legacy (NULL customer_id) suppression row rather than dropping it.
     """
-    tags = (mail or {}).get("tags", {}) or {}
-    raw_tag = tags.get("customer_id") or tags.get("customerId") or []
-    if isinstance(raw_tag, list) and raw_tag:
-        candidate = str(raw_tag[0]).strip() or None
-    elif isinstance(raw_tag, str):
-        candidate = raw_tag.strip() or None
-    else:
-        candidate = None
+    user_vars = (event_data or {}).get("user-variables") or {}
+    candidate = user_vars.get("customer_id") or user_vars.get("customerId")
+    if not candidate:
+        return None
+    candidate = str(candidate).strip() or None
     if candidate and not _UUID_RE.match(candidate.lower()):
         logger.warning(
-            "SES notification carried malformed customer_id tag",
+            "Mailgun event carried malformed customer_id tag",
             extra={"customer_id_tag": candidate},
         )
         return None
@@ -40,37 +46,33 @@ def extract_customer_id_tag(mail: dict[str, Any]) -> Optional[str]:
 
 
 def emails_and_reason(
-    inner: dict[str, Any],
+    event_data: dict[str, Any],
 ) -> tuple[list[str], str, str, bool]:
-    """Map an SES notification body to (emails, reason, detail, recognized).
+    """Map a Mailgun event data object to (emails, reason, detail, recognized).
 
-    `recognized` is False for notification types we don't act on (e.g.
-    Delivery), so the caller can return an 'ignored' response instead of
-    silently treating it as a no-op success.
+    `recognized` is False for event types we don't act on (e.g. delivered,
+    opened), so the caller can return an 'ignored' response.
+
+    Mailgun event types we handle:
+      - "failed" + severity "permanent"  → hard bounce → suppress
+      - "complained"                      → spam complaint → suppress
     """
-    notification_type = inner.get("notificationType", "")
-    if notification_type == "Bounce":
-        bounce = inner.get("bounce", {}) or {}
-        bounce_type = bounce.get("bounceType", "")
-        bounce_subtype = bounce.get("bounceSubType", "")
-        detail = f"{bounce_type}/{bounce_subtype}"
-        emails: list[str] = []
-        # Only suppress on permanent (hard) bounces — soft bounces retry.
-        if bounce_type == "Permanent":
-            for r in bounce.get("bouncedRecipients", []) or []:
-                addr = (r or {}).get("emailAddress", "")
-                if addr:
-                    emails.append(addr.lower())
+    event_type = (event_data or {}).get("event", "")
+
+    if event_type == "failed":
+        severity = (event_data or {}).get("severity", "")
+        if severity != "permanent":
+            # Temporary failures — don't suppress, just ignore
+            return [], "", f"failed/{severity}", False
+        recipient = (event_data or {}).get("recipient", "")
+        delivery_status = (event_data or {}).get("delivery-status") or {}
+        detail = delivery_status.get("description") or delivery_status.get("message") or "permanent"
+        emails = [recipient.lower()] if recipient else []
         return emails, "bounce", detail, True
 
-    if notification_type == "Complaint":
-        complaint = inner.get("complaint", {}) or {}
-        detail = complaint.get("complaintFeedbackType", "abuse")
-        emails = []
-        for r in complaint.get("complainedRecipients", []) or []:
-            addr = (r or {}).get("emailAddress", "")
-            if addr:
-                emails.append(addr.lower())
-        return emails, "complaint", detail, True
+    if event_type == "complained":
+        recipient = (event_data or {}).get("recipient", "")
+        emails = [recipient.lower()] if recipient else []
+        return emails, "complaint", "abuse", True
 
     return [], "", "", False

@@ -1,122 +1,78 @@
 """
-SES bounce/complaint webhook handler — Sprint 6.
+Mailgun bounce/complaint webhook handler.
 
-AWS SES sends notifications via SNS to POST /webhooks/ses.
-We handle:
-  - SubscriptionConfirmation: validate URL host + signature, then auto-confirm
-  - Notification: validate signature + TopicArn, hand off to SesWebhookService
+Mailgun POSTs to /webhooks/mailgun for:
+  - failed (permanent) → hard bounce → suppress recipient
+  - complained         → spam complaint → suppress recipient
 
-Security (Sprint A):
-  - SNS signature verified via x509 cert from sns.*.amazonaws.com (HTTPS only).
-  - TopicArn must be in SNS_ALLOWED_TOPIC_ARNS env (comma-separated).
-  - SubscribeURL must be https and host must match the SNS allowlist regex.
+Security:
+  - HMAC-SHA256 signature verified via mailgun_validator.
+  - Timestamp freshness + token replay protection enforced.
+  - MAILGUN_WEBHOOK_SIGNING_KEY must be set in env.
 
-Sprint C1 t7: notification parsing + suppression upsert moved to
-SesWebhookService. Router keeps the SNS protocol/security layer.
+Mailgun webhook payload structure:
+  {
+    "signature": {"timestamp": "...", "token": "...", "signature": "..."},
+    "event-data": { "event": "failed"|"complained", "recipient": "...", ... }
+  }
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
 
-import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from deps import get_webhook_service
-from services.webhooks import SesWebhookService
-from sns_validator import (
-    SNSValidationError,
-    validate_subscribe_url,
-    verify_sns_message,
-)
+from mailgun_validator import MailgunValidationError, verify_mailgun_webhook
+from services.webhooks import MailgunWebhookService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
-# Operator must list the SNS TopicArns we accept. Empty = reject everything,
-# which is the safe default; misconfiguration is loud, not silent.
-_ALLOWED_TOPIC_ARNS = [
-    t.strip() for t in os.environ.get("SNS_ALLOWED_TOPIC_ARNS", "").split(",") if t.strip()
-]
-
-# M-3: asyncio.create_task only holds a *weak* reference to the task — if no
-# strong ref is kept, the task can be garbage-collected mid-flight and the
-# subscription will silently never confirm. Module-level set holds the strong
-# ref until each task finishes; done_callback evicts so it doesn't leak.
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
+_SIGNING_KEY = os.environ.get("MAILGUN_WEBHOOK_SIGNING_KEY", "")
 
 
-async def _confirm_subscription(subscribe_url: str) -> None:
-    """GET the SubscribeURL to confirm the SNS subscription (host pre-validated)."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                subscribe_url, timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                logger.info(
-                    "SNS subscription confirmed",
-                    extra={"status": resp.status, "host": subscribe_url.split("/")[2]},
-                )
-    except Exception as exc:
-        logger.error("SNS subscription confirm failed", extra={"error": str(exc)})
-
-
-@router.post("/ses")
-async def ses_webhook(
+@router.post("/mailgun")
+async def mailgun_webhook(
     request: Request,
-    webhook: SesWebhookService = Depends(get_webhook_service),
+    webhook: MailgunWebhookService = Depends(get_webhook_service),
 ):
-    """Receive SES bounce/complaint notifications from SNS."""
-    body_bytes = await request.body()
+    """Receive Mailgun bounce/complaint event notifications."""
     try:
-        outer = json.loads(body_bytes)
-    except json.JSONDecodeError:
+        body = await request.json()
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    msg_type = outer.get("Type", "")
+    sig = body.get("signature") or {}
+    timestamp = sig.get("timestamp", "")
+    token = sig.get("token", "")
+    signature = sig.get("signature", "")
 
-    # --- Signature + TopicArn check (applies to all real SNS messages) -------
     try:
-        verify_sns_message(outer, _ALLOWED_TOPIC_ARNS)
-    except SNSValidationError as exc:
-        logger.warning(
-            "SNS message rejected",
-            extra={
-                "reason": str(exc),
-                "type": msg_type,
-                "topic_arn": outer.get("TopicArn", ""),
-            },
+        verify_mailgun_webhook(
+            timestamp=timestamp,
+            token=token,
+            signature=signature,
+            signing_key=_SIGNING_KEY,
         )
-        raise HTTPException(status_code=403, detail="SNS validation failed")
+    except MailgunValidationError as exc:
+        logger.warning(
+            "Mailgun webhook rejected",
+            extra={"reason": str(exc)},
+        )
+        raise HTTPException(status_code=403, detail="Mailgun validation failed")
 
-    # --- Auto-confirm SNS subscription ---------------------------------------
-    if msg_type == "SubscriptionConfirmation":
-        subscribe_url = outer.get("SubscribeURL", "")
-        try:
-            validate_subscribe_url(subscribe_url)
-        except SNSValidationError as exc:
-            logger.warning("SubscribeURL rejected", extra={"reason": str(exc)})
-            raise HTTPException(status_code=403, detail="SubscribeURL invalid")
-        task = asyncio.create_task(_confirm_subscription(subscribe_url))
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
-        return {"status": "confirming"}
+    event_data = body.get("event-data") or {}
+    if not event_data:
+        return {"status": "ignored", "detail": "no event-data"}
 
-    if msg_type != "Notification":
-        return {"status": "ignored"}
-
-    # --- Hand off to the service ---------------------------------------------
-    try:
-        result = await webhook.process_notification(outer)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    result = await webhook.process_event(event_data)
 
     payload: dict = {"status": result.status}
     if result.status == "ok":
         payload["suppressed"] = result.suppressed
     elif result.status == "ignored" and result.detail is not None:
-        payload["type"] = result.detail
+        payload["event"] = result.detail
     return payload

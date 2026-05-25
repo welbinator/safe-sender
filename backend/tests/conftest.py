@@ -26,11 +26,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path as _Path
-
-# S-L4 — make the shared safesender_crypto package importable without a Docker
-# build. Tests run from backend/ but the package lives at <repo>/shared/.
-sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "shared"))
 import time
 from pathlib import Path
 
@@ -189,9 +184,8 @@ def _seed_env(_pg_server):
     # Ensure cookie can be set over http TestClient (no TLS).
     os.environ["COOKIE_INSECURE"] = "1"
     # Stop welcome-email background tasks from doing anything externally —
-    # boto3 will still try to read creds; we set a region but no creds, so
-    # the background task will fail silently (handler swallows exceptions).
-    os.environ.setdefault("AWS_REGION", "us-east-1")
+    # Mailgun API key is blank so _send_email_sync logs and returns early.
+    os.environ.setdefault("MAILGUN_API_KEY", "")
     # Tests don't enforce Google Workspace `hd`.
     os.environ.setdefault("WORKSPACE_ONLY", "0")
     # F-49 — rate limiter is fail-open and Redis is not present in pytest.

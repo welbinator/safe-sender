@@ -3,7 +3,7 @@
 C16 (per-customer suppression) is covered by integration tests and the live
 checks in the outbound-email-filter skill — it requires the backend + DB.
 
-We can't import smtp/main.py directly here (it pulls aiosmtpd / boto3 which
+We can't import smtp/main.py directly here (it pulls aiosmtpd which
 aren't in the backend test venv), so we extract the C12/C15 implementations
 by AST-loading the relevant functions into a synthetic module.
 """
@@ -19,7 +19,7 @@ SMTP_MAIN = Path(__file__).resolve().parents[2] / "smtp" / "main.py"
 def _load_helpers() -> types.ModuleType:
     """Pull _normalize_subject / _hash_subject / _decode_salt + their deps
     out of smtp/main.py and exec them in an isolated module — avoids the
-    aiosmtpd/boto3 import chain.
+    aiosmtpd import chain.
     """
     source = SMTP_MAIN.read_text()
     tree = ast.parse(source)

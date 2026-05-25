@@ -1,49 +1,30 @@
 """
-Email-dispatch service (Sprint C3 F-27).
+Email-dispatch service (Sprint C3 F-27, Mailgun rewrite).
 
-Owns the *transport* concern for outbound emails: SES client lifecycle, retry
-config, structured logging, error swallowing. Templates live in
+Owns the *transport* concern for outbound emails: Mailgun HTTP API client,
+retry config, structured logging, error swallowing. Templates live in
 `services.email_templates`; this module just sends.
 
-Before: router-level helpers `_send_welcome_email_sync` / `_get_ses_client`
-mixed FastAPI handler code with boto3 wiring. Hard to unit-test, hard to reuse
-for future emails (verification, password-reset, billing). This module
-isolates the transport so the router stays an HTTP boundary only.
+Previously used boto3/SES. AWS SES sandbox exit was rejected; all delivery
+now goes through Mailgun HTTP API (api.mailgun.net/v3/{domain}/messages).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from typing import Optional
 
-import boto3
-from botocore.config import Config as BotoConfig
+import httpx
 
 from services.email_templates import render_welcome_email
 
 logger = logging.getLogger(__name__)
 
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-SES_SOURCE_ARN = os.environ.get("SES_SOURCE_ARN", "")
+MAILGUN_API_KEY = os.environ.get("MAILGUN_API_KEY", "")
+MAILGUN_DOMAIN = os.environ.get("MAILGUN_DOMAIN", "mg.sendersafety.com")
 FROM_EMAIL = os.environ.get("FROM_EMAIL", "noreply@sendersafety.com")
 
-# Cached at module scope: boto3 clients cost ~100ms to construct (creds
-# discovery + endpoint resolution). Reuse one across requests; pin tight
-# timeouts so a stalled SES call cannot pin a worker thread forever (F-05, F-07).
-_BOTO_CONFIG = BotoConfig(
-    connect_timeout=5,
-    read_timeout=10,
-    retries={"max_attempts": 2, "mode": "standard"},
-)
-_ses_client = None
-
-
-def _get_ses_client():
-    global _ses_client
-    if _ses_client is None:
-        _ses_client = boto3.client("ses", region_name=AWS_REGION, config=_BOTO_CONFIG)
-    return _ses_client
+_MAILGUN_API_URL = f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages"
 
 
 def _send_email_sync(
@@ -53,25 +34,33 @@ def _send_email_sync(
     body_text: str,
     body_html: str,
 ) -> None:
-    """Blocking SES send. Errors are logged with traceback and swallowed —
+    """Blocking Mailgun send. Errors are logged with traceback and swallowed —
     callers schedule this off the request path so the user response is not
-    coupled to SES availability."""
-    try:
-        ses = _get_ses_client()
-        kwargs: dict = dict(
-            Source=FROM_EMAIL,
-            Destination={"ToAddresses": [to_email]},
-            Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {
-                    "Text": {"Data": body_text, "Charset": "UTF-8"},
-                    "Html": {"Data": body_html, "Charset": "UTF-8"},
-                },
-            },
+    coupled to Mailgun availability."""
+    if not MAILGUN_API_KEY:
+        logger.error(
+            "email_send_skipped",
+            extra={"reason": "MAILGUN_API_KEY not configured", "to_email": to_email},
         )
-        if SES_SOURCE_ARN:
-            kwargs["SourceArn"] = SES_SOURCE_ARN
-        ses.send_email(**kwargs)
+        return
+    try:
+        resp = httpx.post(
+            _MAILGUN_API_URL,
+            auth=("api", MAILGUN_API_KEY),
+            data={
+                "from": FROM_EMAIL,
+                "to": to_email,
+                "subject": subject,
+                "text": body_text,
+                "html": body_html,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        logger.info(
+            "email_sent",
+            extra={"to_email": to_email, "subject": subject, "status": resp.status_code},
+        )
     except Exception as exc:  # noqa: BLE001
         # F-29: log full traceback so background failures aren't invisible.
         logger.exception(
