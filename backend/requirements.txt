@@ -25,3 +25,6 @@ prometheus-client==0.21.0
 # F-49 — per-customer rate limiting backed by Redis token-bucket.
 # Async client; redis-py 5.x rolls hiredis + asyncio support into the main pkg.
 redis==5.2.1
+# F-58 — Sentry runtime error monitoring. SDK with FastAPI integration.
+# No-op when SENTRY_DSN is unset, so safe to keep installed in all envs.
+sentry-sdk[fastapi]==2.60.0

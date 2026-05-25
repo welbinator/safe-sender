@@ -853,6 +853,14 @@ def build_ssl_context() -> ssl.SSLContext | None:
 
 
 if __name__ == "__main__":
+    # Initialize Sentry first so any subsequent startup failures get captured.
+    # No-op when SENTRY_DSN is unset.
+    try:
+        from observability import init_sentry
+        init_sentry(service_name="smtp")
+    except Exception as _sentry_exc:  # pragma: no cover - never fatal
+        sys.stderr.write(f"sentry init failed (continuing without it): {_sentry_exc}\n")
+
     authenticator = Authenticator()
     ssl_context = build_ssl_context()
 
