@@ -23,7 +23,7 @@ hierarchy. Service classes and per-service data carriers
 from their concrete module:
 
     from services.auth import AuthService, LoginResult         # ✓
-    from services.webhooks import SesWebhookService            # ✓
+    from services.webhooks import MailgunWebhookService         # ✓
     from services import AuthService                           # ✗ (gone)
 
 This kills the "import everything from one place" pattern that hides

@@ -317,5 +317,5 @@ async def get_admin_service(conn=Depends(get_conn)):
 
 
 async def get_webhook_service(conn=Depends(get_conn)):
-    from services.webhooks import SesWebhookService
-    return SesWebhookService(SuppressionRepository(conn))
+    from services.webhooks import MailgunWebhookService
+    return MailgunWebhookService(SuppressionRepository(conn))

@@ -17,34 +17,43 @@ services:
       retries: 10
     # No port exposure — internal only
 
-  # S-M6: shared rate-limit + future job/cache backend. AOF off, in-memory
-  # only — losing the dataset just resets sliding windows, which is fine.
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    command:
+      - redis-server
+      - --save
+      - ''
+      - --appendonly
+      - 'no'
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
     restart: always
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
-    # No port exposure — internal only.
 
   backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
+    build: ./backend
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       ADMIN_SECRET: ${ADMIN_SECRET}
       INTERNAL_SHARED_SECRET: ${INTERNAL_SHARED_SECRET}
-      SNS_ALLOWED_TOPIC_ARNS: ${SNS_ALLOWED_TOPIC_ARNS}
+      MAILGUN_API_KEY: ${MAILGUN_API_KEY}
+      MAILGUN_DOMAIN: ${MAILGUN_DOMAIN}
+      FROM_EMAIL: ${FROM_EMAIL}
+      MAILGUN_WEBHOOK_SIGNING_KEY: ${MAILGUN_WEBHOOK_SIGNING_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      ALLOW_TEST_TOKENS: ${ALLOW_TEST_TOKENS:-0}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     # Bind to loopback only — nginx is the only thing that should reach the API.
     ports:
@@ -52,29 +61,26 @@ services:
     restart: always
 
   smtp:
-    build:
-      context: .
-      dockerfile: smtp/Dockerfile
+    build: ./smtp
     ports:
       - "25:25"
       - "587:587"
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
       BACKEND_URL: http://backend:8000
       INTERNAL_SHARED_SECRET: ${INTERNAL_SHARED_SECRET}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${AWS_REGION:-us-east-1}
-      SES_SOURCE_ARN: ${SES_SOURCE_ARN}
+      MAILGUN_SMTP_HOST: ${MAILGUN_SMTP_HOST}
+      MAILGUN_SMTP_PORT: ${MAILGUN_SMTP_PORT}
+      MAILGUN_SMTP_LOGIN: ${MAILGUN_SMTP_LOGIN}
+      MAILGUN_SMTP_PASSWORD: ${MAILGUN_SMTP_PASSWORD}
+      MAILGUN_API_KEY: ${MAILGUN_API_KEY}
+      MAILGUN_DOMAIN: ${MAILGUN_DOMAIN}
+      FROM_EMAIL: ${FROM_EMAIL}
       AUTH_USERNAME: ${SMTP_AUTH_USERNAME}
       AUTH_PASSWORD: ${SMTP_AUTH_PASSWORD}
-      # S-M6: distributed sliding-window rate limiter via redis service.
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       TLS_CERT_PATH: ${TLS_CERT_PATH}
       TLS_KEY_PATH: ${TLS_KEY_PATH}
       PORT25_ALLOWED_CIDRS: ${PORT25_ALLOWED_CIDRS:-}
