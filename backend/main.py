@@ -81,6 +81,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from internal_auth import require_internal_secret
 from db import close_pool, get_pool, set_pool
+from observability import init_sentry
+
+# Initialize Sentry BEFORE FastAPI() so the integration can patch routing.
+# No-op when SENTRY_DSN is unset (i.e. local dev without DSN).
+init_sentry(service_name="backend")
 
 app = FastAPI(title="Sender Safety API", version="0.3.0")
 app.add_middleware(RequestIdMiddleware)

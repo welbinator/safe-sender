@@ -49,6 +49,13 @@ decrypt_env() {
 case "${1:-up}" in
   up)
     decrypt_env
+    # Inject SENTRY_RELEASE = current git SHA so Sentry events are tagged
+    # with the deployed commit. Appended to runtime env so all services +
+    # the dashboard build see the same value.
+    if command -v git >/dev/null 2>&1 && git rev-parse --short HEAD >/dev/null 2>&1; then
+      SENTRY_RELEASE="$(git rev-parse --short HEAD)"
+      printf '\nSENTRY_RELEASE=%s\nVITE_SENTRY_RELEASE=%s\n' "$SENTRY_RELEASE" "$SENTRY_RELEASE" >> "$RUNTIME_ENV"
+    fi
     docker compose --env-file "$RUNTIME_ENV" -f "$COMPOSE_FILE" up -d --build
     # NOTE: do NOT wipe $RUNTIME_ENV — compose re-reads it on subsequent
     # `docker compose` invocations against the same project. Tmpfs wipes

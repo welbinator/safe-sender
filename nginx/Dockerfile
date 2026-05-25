@@ -27,6 +27,16 @@ COPY dashboard/ ./
 #   docker compose build --build-arg VITE_API_URL=https://api.example.com nginx
 ARG VITE_API_URL=/api
 ENV VITE_API_URL=$VITE_API_URL
+# Sentry — DSN and metadata baked into the SPA bundle at build time.
+# All four default to empty: with no DSN, the dashboard's initSentry() is a no-op.
+ARG VITE_SENTRY_DSN=
+ARG VITE_SENTRY_ENVIRONMENT=production
+ARG VITE_SENTRY_TRACES_SAMPLE_RATE=0.05
+ARG VITE_SENTRY_RELEASE=
+ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN
+ENV VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT
+ENV VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE
+ENV VITE_SENTRY_RELEASE=$VITE_SENTRY_RELEASE
 RUN npm run build
 
 # ---- Stage 2: nginx serving the built SPA ----
