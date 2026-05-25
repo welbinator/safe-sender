@@ -37,7 +37,9 @@ services:
       retries: 5
 
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,7 +63,9 @@ services:
     restart: always
 
   smtp:
-    build: ./smtp
+    build:
+      context: .
+      dockerfile: smtp/Dockerfile
     ports:
       - "25:25"
       - "587:587"
