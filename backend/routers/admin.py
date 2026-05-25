@@ -42,9 +42,9 @@ logger = logging.getLogger(__name__)
 # ── Configuration ────────────────────────────────────────────────────────────
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 _WEAK_ADMIN = {"", "changeme", "secret", "password", "admin", "default"}
-if ADMIN_SECRET and (ADMIN_SECRET.lower() in _WEAK_ADMIN or len(ADMIN_SECRET) < 32):
+if ADMIN_SECRET and (ADMIN_SECRET.lower() in _WEAK_ADMIN or len(ADMIN_SECRET) < 48):
     raise RuntimeError(
-        "ADMIN_SECRET is weak/default/short (<32 chars). "
+        "ADMIN_SECRET is weak/default/short (<48 chars). "
         "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
     )
 
@@ -120,6 +120,15 @@ async def _check_rate_limit(ip: str) -> bool:
         # records the rate-limit-skipped path implicitly (the admin call
         # itself is logged).
         logger.exception("admin: rate limiter DB call failed; allowing request")
+        try:
+            import sentry_sdk
+            sentry_sdk.capture_message(
+                "admin_rate_limit_fail_open",
+                level="warning",
+                extras={"ip": ip},
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return True
 
 

@@ -84,6 +84,10 @@ services:
       TLS_CERT_PATH: ${TLS_CERT_PATH}
       TLS_KEY_PATH: ${TLS_KEY_PATH}
       PORT25_ALLOWED_CIDRS: ${PORT25_ALLOWED_CIDRS:-}
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     volumes:
       # Mount Let's Encrypt certs from host
       - /etc/letsencrypt:/etc/letsencrypt:ro

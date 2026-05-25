@@ -28,6 +28,7 @@ import json
 import os
 import secrets
 import time
+from collections import OrderedDict
 from typing import Tuple
 
 from cryptography.hazmat.primitives import hashes
@@ -38,6 +39,35 @@ WIRE_VERSION = 1
 MAX_AGE_SECONDS = 60  # reject blobs older than this (replay window)
 _HKDF_INFO = b"sendersafety/smtp-auth/v1"
 _AAD_PREFIX = b"v1|"
+
+# ---------------------------------------------------------------------------
+# M-5 nonce replay cache — prevents a passively-observed valid blob from
+# being re-used within the 60 s freshness window.
+# ---------------------------------------------------------------------------
+# LRU bounded at 2× peak-QPS × MAX_AGE_SECONDS (generous headroom).
+# Single-process in-memory is sufficient until backend is horizontally scaled;
+# at that point, migrate to Redis SETNX EX 60 (same migration as M-2).
+_REPLAY_CACHE_MAX = 2000  # at 60 s window, this supports ~33 auths/sec sustained
+_seen_nonces: OrderedDict[bytes, int] = OrderedDict()  # nonce → expiry timestamp
+
+
+def _check_and_record_nonce(nonce: bytes, expiry: int) -> bool:
+    """Return True if nonce is fresh/unseen, False if it's a replay."""
+    now = int(time.time())
+    # Evict expired entries (keep cache bounded without a background task).
+    # Iterate a snapshot so we can mutate while iterating.
+    for k, exp in list(_seen_nonces.items()):
+        if exp <= now:
+            _seen_nonces.pop(k, None)
+        else:
+            break  # OrderedDict insertion order == arrival order; rest are newer
+    if nonce in _seen_nonces:
+        return False
+    _seen_nonces[nonce] = expiry
+    # Hard cap: drop the oldest entry if we exceed the limit.
+    while len(_seen_nonces) > _REPLAY_CACHE_MAX:
+        _seen_nonces.popitem(last=False)
+    return True
 
 
 def _derive_key(shared_secret: str) -> bytes:
@@ -102,6 +132,10 @@ def open_password(
         raise ValueError("auth_blob expired")
     if ts - current > max_age_seconds:
         raise ValueError("auth_blob from the future")
+    # M-5: nonce replay check — reject reuse within the freshness window.
+    expiry = ts + max_age_seconds
+    if not _check_and_record_nonce(nonce, expiry):
+        raise ValueError("auth_blob nonce already used (replay)")
     pw = payload["p"]
     if not isinstance(pw, str):
         raise ValueError("auth_blob password field not a string")

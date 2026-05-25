@@ -2,7 +2,7 @@ name: security
 
 on:
   push:
-    branches: [main, develop, sprint-a-security]
+    branches: [main, develop]
   pull_request:
     branches: [main, develop]
 
@@ -37,6 +37,21 @@ jobs:
           python-version: "3.12"
       - run: pip install pip-audit==2.7.3
       - run: pip-audit -r ${{ matrix.component }}/requirements.txt --strict
+      - name: pip-audit lockfile (if present)
+        run: |
+          LOCK="${{ matrix.component }}/requirements.lock"
+          if [ -f "$LOCK" ]; then pip-audit -r "$LOCK" --strict; fi
+
+  npm_audit:
+    name: npm audit (dashboard CVEs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - run: cd dashboard && npm ci --prefer-offline
+      - run: cd dashboard && npm audit --production --audit-level=high
 
   semgrep:
     name: Semgrep (SAST)
