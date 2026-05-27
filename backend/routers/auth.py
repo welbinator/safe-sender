@@ -258,7 +258,7 @@ async def auth_google_start(request: Request, return_to: str = "/"):
         key="oauth_state",
         value=seal_state(state),
         max_age=STATE_TTL_SECONDS,
-        path="/auth/google/callback",  # nginx strips /api prefix
+        path="/api/auth/google/callback",  # nginx strips /api prefix
         httponly=True,
         secure=_cookie_secure(),
         samesite="lax",
@@ -286,7 +286,7 @@ async def auth_google_callback(
         # Always burn the state cookie on the way out — even on error — so a
         # half-completed attempt can't be retried with the same state.
         r = RedirectResponse(url=f"{PUBLIC_ORIGIN}/login?error={reason}", status_code=302)
-        r.delete_cookie("oauth_state", path="/auth/google/callback")
+        r.delete_cookie("oauth_state", path="/api/auth/google/callback")
         return r
 
     if error:
@@ -386,7 +386,7 @@ async def auth_google_callback(
     for hdr_name, hdr_val in response.raw_headers:
         if hdr_name.lower() == b"set-cookie":
             redirect.raw_headers.append((hdr_name, hdr_val))
-    redirect.delete_cookie("oauth_state", path="/auth/google/callback")
+    redirect.delete_cookie("oauth_state", path="/api/auth/google/callback")
     return redirect
 
 
