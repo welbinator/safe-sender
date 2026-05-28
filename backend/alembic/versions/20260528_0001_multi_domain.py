@@ -7,7 +7,7 @@ Create Date: 2026-05-28
 Adds customer_domains table so each customer can verify multiple sending
 domains. Migrates existing single-domain data from the customers table.
 The old domain/domain_verified/domain_verification_token columns on
-customers are left in place for backward compat — to be dropped later.
+customers are left in place for backward compat -- to be dropped later.
 """
 from alembic import op
 
@@ -40,7 +40,6 @@ def upgrade() -> None:
         "CREATE INDEX IF NOT EXISTS idx_customer_domains_domain ON customer_domains (domain)"
     )
 
-    # Migrate existing customer rows into customer_domains
     op.execute(
         """
         INSERT INTO customer_domains (customer_id, domain, verified, verification_token, created_at)
@@ -51,7 +50,7 @@ def upgrade() -> None:
             domain_verification_token,
             NOW()
         FROM customers
-        WHERE domain IS NOT NULL AND domain != 
+        WHERE domain IS NOT NULL AND domain != ''
         ON CONFLICT (domain) DO NOTHING
         """
     )
