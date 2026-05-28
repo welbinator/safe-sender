@@ -62,3 +62,13 @@ class TooManyRules(ServiceError):
 
     status_code = 409
     default_message = "Active rule limit reached"
+
+
+class DomainConflictError(ServiceError):
+    status_code = 409
+    default_message = "This domain has already been verified by another account. If you believe this is an error, contact support."
+
+
+class CannotRemoveLastDomainError(ServiceError):
+    status_code = 400
+    default_message = "Cannot remove your last verified domain."

@@ -61,22 +61,26 @@ async def create_scan_log(body: ScanLogRequest):
     if bind_sender:
         sender_domain = body.sender.rsplit("@", 1)[-1].lower().strip()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT domain FROM customers WHERE id = $1",
+            customer_row = await conn.fetchrow(
+                "SELECT 1 FROM customers WHERE id = $1",
                 body.customer_id,
             )
-        if row is None:
-            logger.warning(
-                "scan_log_unknown_customer",
-                extra={"customer_id": str(body.customer_id)},
+            if customer_row is None:
+                logger.warning(
+                    "scan_log_unknown_customer",
+                    extra={"customer_id": str(body.customer_id)},
+                )
+                raise HTTPException(status_code=404, detail="Unknown customer")
+            domain_row = await conn.fetchrow(
+                "SELECT 1 FROM customer_domains WHERE customer_id = $1 AND domain = $2 AND verified = TRUE",
+                body.customer_id,
+                sender_domain,
             )
-            raise HTTPException(status_code=404, detail="Unknown customer")
-        if (row["domain"] or "").lower() != sender_domain:
+        if domain_row is None:
             logger.warning(
-                "scan_log_sender_customer_mismatch",
+                "scan_log_sender_domain_not_verified",
                 extra={
                     "customer_id": str(body.customer_id),
-                    "expected_domain": row["domain"],
                     "sender_domain": sender_domain,
                 },
             )

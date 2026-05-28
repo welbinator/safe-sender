@@ -110,3 +110,59 @@ class CustomerRepository(BaseRepository):
             password_hash, customer_id,
         )
         return _as_dict(row)
+
+
+    # --- customer_domains table ------------------------------------------
+
+    async def list_domains(self, customer_id) -> list[dict]:
+        rows = await self.conn.fetch(
+            "SELECT id, domain, verified, created_at FROM customer_domains"
+            " WHERE customer_id = $1 ORDER BY created_at",
+            customer_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def get_domain_entry(self, customer_id, domain: str):
+        row = await self.conn.fetchrow(
+            "SELECT * FROM customer_domains WHERE customer_id = $1 AND domain = $2",
+            customer_id, domain,
+        )
+        return _as_dict(row)
+
+    async def domain_exists_for_other_customer(self, domain: str, customer_id) -> bool:
+        val = await self.conn.fetchval(
+            "SELECT 1 FROM customer_domains WHERE domain = $1 AND customer_id != $2 AND verified = TRUE",
+            domain, customer_id,
+        )
+        return val is not None
+
+    async def add_domain(self, customer_id, domain: str):
+        row = await self.conn.fetchrow(
+            """
+            INSERT INTO customer_domains (customer_id, domain)
+            VALUES ($1, $2)
+            ON CONFLICT (domain) DO NOTHING
+            RETURNING id, domain, verified, created_at
+            """,
+            customer_id, domain,
+        )
+        return _as_dict(row)
+
+    async def set_domain_verification_token(self, customer_id, domain: str, token: str) -> None:
+        await self.conn.execute(
+            "UPDATE customer_domains SET verification_token = $1 WHERE customer_id = $2 AND domain = $3",
+            token, customer_id, domain,
+        )
+
+    async def mark_domain_verified_by_domain(self, customer_id, domain: str) -> None:
+        await self.conn.execute(
+            "UPDATE customer_domains SET verified = TRUE WHERE customer_id = $1 AND domain = $2",
+            customer_id, domain,
+        )
+
+    async def delete_domain(self, customer_id, domain: str) -> bool:
+        result = await self.conn.execute(
+            "DELETE FROM customer_domains WHERE customer_id = $1 AND domain = $2",
+            customer_id, domain,
+        )
+        return result.endswith("DELETE 1")
