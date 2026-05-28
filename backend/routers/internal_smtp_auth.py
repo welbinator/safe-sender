@@ -109,4 +109,16 @@ async def smtp_auth(body: SmtpAuthRequest):
     if not valid:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    return {"customer_id": str(row["id"]), "domain": row["domain"], "admin": False}
+    pool2 = get_pool()
+    async with pool2.acquire() as conn2:
+        domain_rows = await conn2.fetch(
+            "SELECT domain FROM customer_domains WHERE customer_id = $1 AND verified = TRUE ORDER BY created_at",
+            row["id"],
+        )
+    domains = [r["domain"] for r in domain_rows]
+    return {
+        "customer_id": str(row["id"]),
+        "domains": domains,
+        "domain": domains[0] if domains else None,
+        "admin": False,
+    }

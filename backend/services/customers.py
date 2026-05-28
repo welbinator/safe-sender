@@ -400,3 +400,72 @@ class CustomerService:
             if auth_username and auth_password:
                 smtp.login(auth_username, auth_password)
             smtp.sendmail(sender, [_TEST_RECIPIENT], msg.as_string())
+
+
+    # ------------------------------------------------------------------
+    # Multi-domain management
+    # ------------------------------------------------------------------
+
+    async def list_domains(self, customer_id) -> list[dict]:
+        return await self.customers.list_domains(customer_id)
+
+    async def add_domain(self, customer: dict, domain: str) -> dict:
+        domain = domain.lower().strip().lstrip("www.").strip()
+        customer_id = customer["id"]
+        if await self.customers.domain_exists_for_other_customer(domain, customer_id):
+            from .errors import DomainConflictError
+            raise DomainConflictError()
+        row = await self.customers.add_domain(customer_id, domain)
+        if row is None:
+            from .errors import DomainConflictError
+            raise DomainConflictError()
+        return {**row, "id": str(row["id"]), "created_at": row["created_at"].isoformat() if row["created_at"] else None}
+
+    async def init_domain_verification_for(self, customer: dict, domain: str) -> dict:
+        domain = domain.lower().strip()
+        entry = await self.customers.get_domain_entry(customer["id"], domain)
+        if entry and entry.get("verified"):
+            return {"token": "already-verified", "txt_name": _VERIFICATION_TXT_LABEL, "txt_value": "already-verified"}
+        token = secrets.token_hex(20)
+        await self.customers.set_domain_verification_token(customer["id"], domain, token)
+        return {
+            "token": token,
+            "txt_name": _VERIFICATION_TXT_LABEL,
+            "txt_value": f"{_VERIFICATION_TXT_PREFIX}{token}",
+        }
+
+    async def check_domain_verification_for(self, customer: dict, domain: str) -> DomainVerificationResult:
+        domain = domain.lower().strip()
+        entry = await self.customers.get_domain_entry(customer["id"], domain)
+        if not entry:
+            raise NotFoundError("Domain not found")
+        if entry.get("verified"):
+            return DomainVerificationResult(True, "Domain already verified.")
+        token = entry.get("verification_token")
+        if not token:
+            raise DomainVerificationNotInitialized()
+        expected = f"{_VERIFICATION_TXT_PREFIX}{token}"
+        if await self._dns_txt_contains(f"{_VERIFICATION_TXT_LABEL}.{domain}", expected):
+            await self.customers.mark_domain_verified_by_domain(customer["id"], domain)
+            return DomainVerificationResult(True, "Domain verified successfully!")
+        return DomainVerificationResult(
+            False,
+            (
+                f"TXT record not found yet. Make sure you added:\n"
+                f"  Name: {_VERIFICATION_TXT_LABEL}.{domain}\n"
+                f"  Value: {expected}\n"
+                f"DNS changes can take up to 48 hours to propagate."
+            ),
+        )
+
+    async def remove_domain(self, customer: dict, domain: str) -> None:
+        from .errors import CannotRemoveLastDomainError
+        domain = domain.lower().strip()
+        customer_id = customer["id"]
+        all_domains = await self.customers.list_domains(customer_id)
+        verified_domains = [d for d in all_domains if d.get("verified")]
+        if len(verified_domains) <= 1 and any(d["domain"] == domain for d in verified_domains):
+            raise CannotRemoveLastDomainError()
+        deleted = await self.customers.delete_domain(customer_id, domain)
+        if not deleted:
+            raise NotFoundError("Domain not found")

@@ -2,14 +2,14 @@
  * SetupGuide — Sprint 5 onboarding wizard.
  *
  * Four steps:
- *  1. Verify your domain (DNS TXT record)
+ *  1. Verify your domain(s) (multi-domain manager)
  *  2. Configure SMTP gateway in Google Workspace
  *  3. Add your first rule
  *  4. Test your connection (true end-to-end SMTP test)
  */
 
 import { useState, useEffect } from 'react';
-import { getMe, getRules, verifyDomainInit, verifyDomainCheck, testConnection, getTestConnectionStatus } from '../api';
+import { getMe, getRules, getDomains, addDomain, domainVerifyInit, domainVerifyCheck, deleteDomain, testConnection, getTestConnectionStatus } from '../api';
 
 // ---------------------------------------------------------------------------
 // Tiny shared UI helpers
@@ -71,7 +71,7 @@ const Code = ({ children }) => (
   </code>
 );
 
-const Alert = ({ type, children }) => {
+const Alert = ({ type, children, style = {} }) => {
   const colors = { info: '#3b82f6', success: '#22c55e', warn: '#f59e0b', error: '#ef4444' };
   return (
     <div style={{
@@ -80,6 +80,7 @@ const Alert = ({ type, children }) => {
       borderLeft: `4px solid ${colors[type]}`,
       borderRadius: 8, padding: '10px 14px',
       color: '#e0e0ff', fontSize: 14, marginTop: 12,
+      ...style,
     }}>
       {children}
     </div>
@@ -87,22 +88,23 @@ const Alert = ({ type, children }) => {
 };
 
 // ---------------------------------------------------------------------------
-// Step 1 — Domain verification
+// Step 1 — Multi-domain manager
 // ---------------------------------------------------------------------------
 
-const StepVerifyDomain = ({ domain, alreadyVerified, onVerified }) => {
-  const [token, setToken] = useState(null);
+const DomainRow = ({ entry, onVerify, onRemove, canRemove }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [tokenInfo, setTokenInfo] = useState(null);
   const [initLoading, setInitLoading] = useState(false);
   const [checkLoading, setCheckLoading] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [verified, setVerified] = useState(alreadyVerified);
 
   const handleInit = async () => {
     setInitLoading(true);
     setMsg(null);
     try {
-      const res = await verifyDomainInit();
-      setToken(res.data.txt_value);
+      const res = await domainVerifyInit(entry.domain);
+      setTokenInfo(res.data);
+      setExpanded(true);
     } catch (e) {
       setMsg({ type: 'error', text: 'Failed to generate token. Try again.' });
     } finally {
@@ -114,11 +116,11 @@ const StepVerifyDomain = ({ domain, alreadyVerified, onVerified }) => {
     setCheckLoading(true);
     setMsg(null);
     try {
-      const res = await verifyDomainCheck();
+      const res = await domainVerifyCheck(entry.domain);
       if (res.data.verified) {
-        setVerified(true);
-        onVerified();
-        setMsg({ type: 'success', text: res.data.message });
+        onVerify(entry.domain);
+        setMsg({ type: 'success', text: '✅ Domain verified!' });
+        setExpanded(false);
       } else {
         setMsg({ type: 'warn', text: res.data.message });
       }
@@ -129,59 +131,190 @@ const StepVerifyDomain = ({ domain, alreadyVerified, onVerified }) => {
     }
   };
 
-  if (verified) {
-    return (
-      <Card>
-        <StepHeader num={1} title="Verify your domain" done />
-        <Alert type="success">✅ <strong>{domain}</strong> is verified.</Alert>
-      </Card>
-    );
-  }
-
   return (
-    <Card>
-      <StepHeader num={1} title="Verify your domain" done={false} />
-      <p style={{ color: '#a0a0c0', fontSize: 14, marginTop: 0 }}>
-        Prove you own <strong style={{ color: '#e0e0ff' }}>{domain}</strong> by adding a DNS TXT record.
-      </p>
+    <div style={{
+      border: '1px solid #2a2a4a',
+      borderRadius: 8,
+      padding: '12px 16px',
+      marginBottom: 10,
+      background: '#12122a',
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{
+            width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
+            background: entry.verified ? '#22c55e' : '#f59e0b',
+            display: 'inline-block',
+          }} />
+          <span style={{ color: '#e0e0ff', fontSize: 14, fontFamily: 'monospace' }}>{entry.domain}</span>
+          <span style={{ fontSize: 12, color: entry.verified ? '#22c55e' : '#f59e0b' }}>
+            {entry.verified ? 'Verified' : 'Pending'}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexShrink: 0, marginLeft: "auto" }}>
+          {!entry.verified && (
+            <Btn onClick={handleInit} loading={initLoading} disabled={initLoading} variant="ghost">
+              {expanded ? 'Refresh token' : 'Verify'}
+            </Btn>
+          )}
+          {canRemove && (
+            <Btn onClick={() => onRemove(entry.domain)} variant="ghost">
+              Remove
+            </Btn>
+          )}
+        </div>
+      </div>
 
-      {!token && (
-        <Btn onClick={handleInit} loading={initLoading} disabled={initLoading}>
-          Generate verification token
-        </Btn>
-      )}
-
-      {token && (
-        <div style={{ marginTop: 12 }}>
-          <p style={{ color: '#a0a0c0', fontSize: 14, margin: '0 0 8px 0' }}>
-            Add this TXT record to your DNS:
+      {expanded && tokenInfo && (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #2a2a4a' }}>
+          <p style={{ color: '#a0a0c0', fontSize: 13, margin: '0 0 10px 0' }}>
+            Add this TXT record to your DNS, then click verify:
           </p>
           <table style={{ fontSize: 13, borderCollapse: 'collapse', width: '100%' }}>
             <tbody>
               <tr>
-                <td style={{ color: '#6c63ff', paddingRight: 16, paddingBottom: 6, width: 80 }}>Name</td>
-                <td><Code>_sendersafety.{domain}</Code></td>
+                <td style={{ color: '#6c63ff', paddingRight: 16, paddingBottom: 6, width: 60, verticalAlign: 'top' }}>Name</td>
+                <td style={{ wordBreak: 'break-all' }}><Code>_sendersafety.{entry.domain}</Code></td>
               </tr>
               <tr>
                 <td style={{ color: '#6c63ff', paddingBottom: 6 }}>Type</td>
                 <td><Code>TXT</Code></td>
               </tr>
               <tr>
-                <td style={{ color: '#6c63ff' }}>Value</td>
-                <td><Code>{token}</Code></td>
+                <td style={{ color: '#6c63ff', verticalAlign: 'top' }}>Value</td>
+                <td style={{ wordBreak: 'break-all' }}><Code>{tokenInfo.txt_value}</Code></td>
               </tr>
             </tbody>
           </table>
-          <p style={{ color: '#a0a0c0', fontSize: 13, margin: '12px 0' }}>
-            DNS changes can take a few minutes to a few hours to propagate. Once you've added the record, click below.
-          </p>
-          <Btn onClick={handleCheck} loading={checkLoading} disabled={checkLoading}>
-            I've added it — verify now
-          </Btn>
+          <div style={{ marginTop: 12 }}>
+            <Btn onClick={handleCheck} loading={checkLoading} disabled={checkLoading}>
+              I've added it — verify now
+            </Btn>
+          </div>
+          {msg && <Alert type={msg.type} style={{ marginTop: 10 }}>{msg.text}</Alert>}
         </div>
       )}
 
-      {msg && <Alert type={msg.type}>{msg.text}</Alert>}
+      {!expanded && msg && <Alert type={msg.type} style={{ marginTop: 10 }}>{msg.text}</Alert>}
+    </div>
+  );
+};
+
+const AddDomainInput = ({ value, onChange, onAdd, loading, error }) => (
+  <div>
+    <div style={{ display: 'flex', gap: 8 }}>
+      <input
+        type="text"
+        placeholder="example.com"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        onKeyDown={e => e.key === 'Enter' && onAdd()}
+        style={{
+          flex: 1, background: '#0d0d1a', border: '1px solid #2a2a4a',
+          borderRadius: 8, padding: '8px 12px', color: '#e0e0ff',
+          fontSize: 14, outline: 'none',
+        }}
+      />
+      <Btn onClick={onAdd} loading={loading} disabled={loading || !value.trim()}>
+        Add
+      </Btn>
+    </div>
+    {error && <Alert type="error" style={{ marginTop: 8 }}>{error}</Alert>}
+  </div>
+);
+
+const StepVerifyDomain = ({ domains, onDomainsChange }) => {
+  const [addInput, setAddInput] = useState('');
+  const [addLoading, setAddLoading] = useState(false);
+  const [addError, setAddError] = useState(null);
+
+  const hasVerified = domains.some(d => d.verified);
+
+  const handleAdd = async () => {
+    const normalized = addInput.trim().toLowerCase().replace(/^www\./, '');
+    if (!normalized) return;
+    setAddLoading(true);
+    setAddError(null);
+    try {
+      const res = await addDomain(normalized);
+      onDomainsChange([...domains, res.data]);
+      setAddInput('');
+    } catch (e) {
+      const msg = e.response?.data?.detail;
+      if (e.response?.status === 409) {
+        setAddError('This domain has already been verified by another account. If you believe this is an error, contact support.');
+      } else {
+        setAddError(msg || 'Failed to add domain. Try again.');
+      }
+    } finally {
+      setAddLoading(false);
+    }
+  };
+
+  const handleVerify = (domain) => {
+    onDomainsChange(domains.map(d => d.domain === domain ? { ...d, verified: true } : d));
+  };
+
+  const handleRemove = async (domain) => {
+    try {
+      await deleteDomain(domain);
+      onDomainsChange(domains.filter(d => d.domain !== domain));
+    } catch (e) {
+      const msg = e.response?.data?.detail || 'Could not remove domain.';
+      alert(msg);
+    }
+  };
+
+  const verifiedCount = domains.filter(d => d.verified).length;
+
+  if (hasVerified && domains.length === 1) {
+    return (
+      <Card>
+        <StepHeader num={1} title="Verify your domain(s)" done />
+        <Alert type="success">✅ <strong>{domains[0].domain}</strong> is verified.</Alert>
+        <div style={{ marginTop: 14 }}>
+          <p style={{ color: '#7070a0', fontSize: 13, margin: '0 0 8px 0' }}>Need to add another domain?</p>
+          <AddDomainInput
+            value={addInput} onChange={setAddInput}
+            onAdd={handleAdd} loading={addLoading} error={addError}
+          />
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <StepHeader num={1} title="Verify your domain(s)" done={hasVerified} />
+      <p style={{ color: '#a0a0c0', fontSize: 14, marginTop: 0, marginBottom: 16 }}>
+        Verify every domain your organisation sends email from. Emails arriving from unverified domains will be rejected.
+      </p>
+
+      {domains.length === 0 && (
+        <Alert type="warn" style={{ marginBottom: 14 }}>
+          No domains yet. Add your first domain below.
+        </Alert>
+      )}
+
+      {domains.map(entry => (
+        <DomainRow
+          key={entry.domain}
+          entry={entry}
+          onVerify={handleVerify}
+          onRemove={handleRemove}
+          canRemove={!(entry.verified && verifiedCount === 1)}
+        />
+      ))}
+
+      <div style={{ marginTop: 16 }}>
+        <p style={{ color: '#7070a0', fontSize: 13, margin: '0 0 8px 0' }}>
+          {domains.length === 0 ? 'Enter your domain:' : 'Add another domain:'}
+        </p>
+        <AddDomainInput
+          value={addInput} onChange={setAddInput}
+          onAdd={handleAdd} loading={addLoading} error={addError}
+        />
+      </div>
     </Card>
   );
 };
@@ -206,7 +339,6 @@ const StepSmtpConfig = ({ domain }) => (
       <li>
         Set the outbound gateway to: <Code>smtp.sendersafety.com</Code>
       </li>
-
       <li>Save and apply to your entire organisation</li>
     </ol>
     <Alert type="info" style={{ marginTop: 16 }}>
@@ -313,6 +445,7 @@ const StepTestConnection = ({ domain, domainVerified }) => {
 
 export default function SetupGuide() {
   const [customer, setCustomer] = useState(null);
+  const [domains, setDomains] = useState([]);
   const [domainVerified, setDomainVerified] = useState(false);
   const [hasRules, setHasRules] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -320,9 +453,10 @@ export default function SetupGuide() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [meRes, rulesRes] = await Promise.all([getMe(), getRules()]);
+        const [meRes, rulesRes, domainsRes] = await Promise.all([getMe(), getRules(), getDomains()]);
         setCustomer(meRes.data);
-        setDomainVerified(meRes.data.domain_verified);
+        setDomains(domainsRes.data || []);
+        setDomainVerified((domainsRes.data || []).some(d => d.verified));
         setHasRules((rulesRes.data || []).length > 0);
       } catch (_) {}
       setLoading(false);
@@ -346,20 +480,22 @@ export default function SetupGuide() {
           🚀 Get started with Sender Safety
         </h2>
         <p style={{ color: '#7070a0', margin: 0, fontSize: 14 }}>
-          Four steps to protect every email leaving <strong style={{ color: '#a0a0d0' }}>{domain}</strong>.
+          Four steps to protect every email leaving your organisation.
         </p>
       </div>
 
       {allDone && (
         <Alert type="success" style={{ marginBottom: 24 }}>
-          🎉 You're all set! Sender Safety is actively filtering outbound email for <strong>{domain}</strong>.
+          🎉 You're all set! Sender Safety is actively filtering outbound email.
         </Alert>
       )}
 
       <StepVerifyDomain
-        domain={domain}
-        alreadyVerified={domainVerified}
-        onVerified={() => setDomainVerified(true)}
+        domains={domains}
+        onDomainsChange={(updated) => {
+          setDomains(updated);
+          setDomainVerified(updated.some(d => d.verified));
+        }}
       />
 
       <StepSmtpConfig domain={domain} />

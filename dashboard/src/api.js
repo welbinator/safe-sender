@@ -117,3 +117,10 @@ export const getTestConnectionStatus = (testId) =>
 // Sprint 7 — SMTP credentials
 export const getSmtpCredentials = () => api.get('/customers/me/smtp-credentials');
 export const rotateSmtpCredentials = () => api.post('/customers/me/smtp-credentials/rotate');
+
+// Multi-domain management
+export const getDomains = () => api.get('/customers/domains');
+export const addDomain = (domain) => api.post('/customers/domains', { domain });
+export const domainVerifyInit = (domain) => api.post(`/customers/domains/${encodeURIComponent(domain)}/verify/init`);
+export const domainVerifyCheck = (domain) => api.post(`/customers/domains/${encodeURIComponent(domain)}/verify/check`);
+export const deleteDomain = (domain) => api.delete(`/customers/domains/${encodeURIComponent(domain)}`);

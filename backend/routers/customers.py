@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from deps import get_current_customer, get_customer_service
 from services import NotFoundError
 from services.customers import CustomerService
+from services.errors import DomainConflictError, CannotRemoveLastDomainError, DomainVerificationNotInitialized
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -36,6 +37,17 @@ _SMTP_AUTH_PASSWORD = os.environ.get("AUTH_PASSWORD", "")
 # Models
 # ---------------------------------------------------------------------------
 
+class DomainEntry(BaseModel):
+    id: str
+    domain: str
+    verified: bool
+    created_at: Optional[str]
+
+
+class AddDomainRequest(BaseModel):
+    domain: str
+
+
 class CustomerResponse(BaseModel):
     id: str
     domain: str
@@ -44,6 +56,7 @@ class CustomerResponse(BaseModel):
     plan: str
     active: bool
     domain_verified: bool
+    domains: list[DomainEntry] = []
 
 
 class CustomerUpdate(BaseModel):
@@ -90,7 +103,16 @@ class SmtpRotateResponse(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_customer_response(row: dict) -> CustomerResponse:
+def _to_customer_response(row: dict, domains: list = None) -> CustomerResponse:
+    domain_entries = []
+    if domains:
+        for d in domains:
+            domain_entries.append(DomainEntry(
+                id=str(d["id"]),
+                domain=d["domain"],
+                verified=d.get("verified", False),
+                created_at=d["created_at"].isoformat() if d.get("created_at") else None,
+            ))
     return CustomerResponse(
         id=str(row["id"]),
         domain=row["domain"],
@@ -99,6 +121,7 @@ def _to_customer_response(row: dict) -> CustomerResponse:
         plan=row["plan"],
         active=row["active"],
         domain_verified=row.get("domain_verified", False),
+        domains=domain_entries,
     )
 
 
@@ -107,8 +130,15 @@ def _to_customer_response(row: dict) -> CustomerResponse:
 # ---------------------------------------------------------------------------
 
 @router.get("/me", response_model=CustomerResponse)
-async def get_me(customer: dict[str, Any] = Depends(get_current_customer)):
-    return _to_customer_response(customer)
+async def get_me(
+    customer: dict[str, Any] = Depends(get_current_customer),
+    service: CustomerService = Depends(get_customer_service),
+):
+    domains = await service.list_domains(customer["id"])
+    if not domains and customer.get("domain"):
+        # backward compat: expose legacy single domain as unverified entry
+        domains = [{"id": str(customer["id"]), "domain": customer["domain"], "verified": customer.get("domain_verified", False), "created_at": None}]
+    return _to_customer_response(customer, domains)
 
 
 @router.patch("/me", response_model=CustomerResponse)
@@ -202,3 +232,83 @@ async def rotate_smtp_credentials(
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return SmtpRotateResponse(**result)
+
+# ---------------------------------------------------------------------------
+# Multi-domain management routes
+# ---------------------------------------------------------------------------
+
+@router.get("/domains", response_model=list[DomainEntry])
+async def list_domains(
+    customer: dict[str, Any] = Depends(get_current_customer),
+    service: CustomerService = Depends(get_customer_service),
+):
+    domains = await service.list_domains(customer["id"])
+    return [
+        DomainEntry(
+            id=str(d["id"]),
+            domain=d["domain"],
+            verified=d.get("verified", False),
+            created_at=d["created_at"].isoformat() if d.get("created_at") else None,
+        )
+        for d in domains
+    ]
+
+
+@router.post("/domains", response_model=DomainEntry, status_code=201)
+async def add_domain(
+    body: AddDomainRequest,
+    customer: dict[str, Any] = Depends(get_current_customer),
+    service: CustomerService = Depends(get_customer_service),
+):
+    try:
+        row = await service.add_domain(customer, body.domain)
+    except DomainConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return DomainEntry(
+        id=str(row["id"]),
+        domain=row["domain"],
+        verified=row.get("verified", False),
+        created_at=row.get("created_at"),
+    )
+
+
+@router.post("/domains/{domain}/verify/init", response_model=VerifyInitResponse)
+async def domain_verify_init(
+    domain: str,
+    customer: dict[str, Any] = Depends(get_current_customer),
+    service: CustomerService = Depends(get_customer_service),
+):
+    try:
+        result = await service.init_domain_verification_for(customer, domain)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return VerifyInitResponse(**result)
+
+
+@router.post("/domains/{domain}/verify/check", response_model=VerifyCheckResponse)
+async def domain_verify_check(
+    domain: str,
+    customer: dict[str, Any] = Depends(get_current_customer),
+    service: CustomerService = Depends(get_customer_service),
+):
+    try:
+        result = await service.check_domain_verification_for(customer, domain)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except DomainVerificationNotInitialized as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return VerifyCheckResponse(verified=result.verified, message=result.message)
+
+
+@router.delete("/domains/{domain}", status_code=204)
+async def remove_domain(
+    domain: str,
+    customer: dict[str, Any] = Depends(get_current_customer),
+    service: CustomerService = Depends(get_customer_service),
+):
+    try:
+        await service.remove_domain(customer, domain)
+    except CannotRemoveLastDomainError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
