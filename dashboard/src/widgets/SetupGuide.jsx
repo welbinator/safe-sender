@@ -139,7 +139,7 @@ const DomainRow = ({ entry, onVerify, onRemove, canRemove }) => {
       marginBottom: 10,
       background: '#12122a',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{
             width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
@@ -151,7 +151,7 @@ const DomainRow = ({ entry, onVerify, onRemove, canRemove }) => {
             {entry.verified ? 'Verified' : 'Pending'}
           </span>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexShrink: 0, marginLeft: "auto" }}>
           {!entry.verified && (
             <Btn onClick={handleInit} loading={initLoading} disabled={initLoading} variant="ghost">
               {expanded ? 'Refresh token' : 'Verify'}
