@@ -368,7 +368,12 @@ const StepSmtpConfig = ({ domain, authProvider }) => {
             <li>Connection from: <strong>Office 365</strong> → Connection to: <strong>Partner organization</strong></li>
             <li>Name: <em>Sender Safety outbound filter</em></li>
             <li>Routing: Route through these smart hosts → <Code>smtp.sendersafety.com</Code></li>
-            <li>Security: TLS required</li>
+            <li>
+              Security: <strong>Always use TLS</strong> — when asked how to identify the partner
+              organization, choose <em>"By verifying that the sender domain matches"</em> and
+              enter <Code>sendersafety.com</Code>
+            </li>
+            <li>Save the connector</li>
           </ol>
           <Alert type="info" style={{ marginTop: 16 }}>
             💡 Connector changes in Exchange Admin Center typically propagate within 30 minutes.
