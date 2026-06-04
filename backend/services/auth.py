@@ -101,3 +101,46 @@ class AuthService:
             is_new=True,
             smtp_username=smtp_username,
         )
+
+    async def login_with_microsoft_claims(
+        self,
+        *,
+        microsoft_sub: str,
+        email: str,
+        company_name: str,
+    ) -> LoginResult:
+        """Upsert keyed on microsoft_sub."""
+        existing = await self.customers.get_by_microsoft_sub(microsoft_sub)
+        if existing:
+            return LoginResult(
+                customer_id=str(existing["id"]),
+                email=email,
+                is_new=False,
+            )
+
+        existing_by_email = await self.customers.get_by_email(email)
+        if existing_by_email:
+            raise ConflictError(
+                "This email is already registered with Google sign-in. "
+                "Please sign in with Google or contact support."
+            )
+
+        smtp_username, _raw, smtp_password_hash = await asyncio.to_thread(
+            self._generate_smtp_credentials
+        )
+        domain = email.split("@")[-1].lower()
+        row = await self.customers.create(
+            domain=domain,
+            name=company_name,
+            email=email,
+            microsoft_sub=microsoft_sub,
+            smtp_username=smtp_username,
+            smtp_password_hash=smtp_password_hash,
+            auth_provider="microsoft",
+        )
+        return LoginResult(
+            customer_id=str(row["id"]),
+            email=email,
+            is_new=True,
+            smtp_username=smtp_username,
+        )

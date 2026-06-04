@@ -320,32 +320,72 @@ const StepVerifyDomain = ({ domains, onDomainsChange }) => {
 };
 
 // ---------------------------------------------------------------------------
-// Step 2 — SMTP gateway config
+// Step 2 — SMTP gateway config (Google Workspace or Microsoft 365)
 // ---------------------------------------------------------------------------
 
-const StepSmtpConfig = ({ domain }) => (
-  <Card>
-    <StepHeader num={2} title="Configure your SMTP gateway" done={false} />
-    <p style={{ color: '#a0a0c0', fontSize: 14, marginTop: 0 }}>
-      Tell Google Workspace to route all outbound email through Sender Safety.
-    </p>
-    <ol style={{ color: '#c0c0e0', fontSize: 14, lineHeight: 1.8, paddingLeft: 20, margin: 0 }}>
-      <li>
-        Open <a href="https://admin.google.com" target="_blank" rel="noreferrer"
-          style={{ color: '#6c63ff' }}>Google Workspace Admin</a>
-      </li>
-      <li>Go to <strong>Apps → Google Workspace → Gmail → Routing</strong></li>
-      <li>Under <strong>Outbound gateway</strong>, click <em>Configure</em></li>
-      <li>
-        Set the outbound gateway to: <Code>smtp.sendersafety.com</Code>
-      </li>
-      <li>Save and apply to your entire organisation</li>
-    </ol>
-    <Alert type="info" style={{ marginTop: 16 }}>
-      💡 Changes in Google Workspace Admin can take up to an hour to propagate across your org.
-    </Alert>
-  </Card>
-);
+const StepSmtpConfig = ({ domain, authProvider }) => {
+  const [platform, setPlatform] = useState(authProvider === 'microsoft' ? 'microsoft' : 'google');
+
+  return (
+    <Card>
+      <StepHeader num={2} title="Configure your SMTP gateway" done={false} />
+      <p style={{ color: '#a0a0c0', fontSize: 14, marginTop: 0 }}>
+        Route all outbound email through Sender Safety.
+      </p>
+
+      {platform === 'google' ? (
+        <>
+          <ol style={{ color: '#c0c0e0', fontSize: 14, lineHeight: 1.8, paddingLeft: 20, margin: 0 }}>
+            <li>
+              Open <a href="https://admin.google.com" target="_blank" rel="noreferrer"
+                style={{ color: '#6c63ff' }}>Google Workspace Admin</a>
+            </li>
+            <li>Go to <strong>Apps → Google Workspace → Gmail → Routing</strong></li>
+            <li>Under <strong>Outbound gateway</strong>, click <em>Configure</em></li>
+            <li>Set the outbound gateway to: <Code>smtp.sendersafety.com</Code></li>
+            <li>Save and apply to your entire organisation</li>
+          </ol>
+          <Alert type="info" style={{ marginTop: 16 }}>
+            💡 Changes in Google Workspace Admin can take up to an hour to propagate.
+          </Alert>
+          <div style={{ marginTop: 14 }}>
+            <button
+              onClick={() => setPlatform('microsoft')}
+              style={{ background: 'none', border: 'none', color: '#6c63ff', cursor: 'pointer', fontSize: 13, padding: 0 }}
+            >
+              Using Microsoft 365? Switch →
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <ol style={{ color: '#c0c0e0', fontSize: 14, lineHeight: 1.8, paddingLeft: 20, margin: 0 }}>
+            <li>
+              Go to <a href="https://admin.exchange.microsoft.com" target="_blank" rel="noreferrer"
+                style={{ color: '#6c63ff' }}>Exchange Admin Center</a>
+            </li>
+            <li>Go to <strong>Mail flow → Connectors → + Add a connector</strong></li>
+            <li>Connection from: <strong>Office 365</strong> → Connection to: <strong>Partner organization</strong></li>
+            <li>Name: <em>Sender Safety outbound filter</em></li>
+            <li>Routing: Route through these smart hosts → <Code>smtp.sendersafety.com</Code></li>
+            <li>Security: TLS required</li>
+          </ol>
+          <Alert type="info" style={{ marginTop: 16 }}>
+            💡 Connector changes in Exchange Admin Center typically propagate within 30 minutes.
+          </Alert>
+          <div style={{ marginTop: 14 }}>
+            <button
+              onClick={() => setPlatform('google')}
+              style={{ background: 'none', border: 'none', color: '#6c63ff', cursor: 'pointer', fontSize: 13, padding: 0 }}
+            >
+              Using Google Workspace? Switch →
+            </button>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+};
 
 // ---------------------------------------------------------------------------
 // Step 3 — First rule reminder (links to Rules page)
@@ -498,7 +538,7 @@ export default function SetupGuide() {
         }}
       />
 
-      <StepSmtpConfig domain={domain} />
+      <StepSmtpConfig domain={domain} authProvider={customer?.auth_provider || 'google'} />
 
       <StepFirstRule hasRules={hasRules} />
 

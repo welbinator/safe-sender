@@ -74,6 +74,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "https://app.sendersafety.com")
 GOOGLE_REDIRECT_URI = f"{PUBLIC_ORIGIN}/api/auth/google/callback"
 
+MICROSOFT_REDIRECT_URI = f"{PUBLIC_ORIGIN}/api/auth/microsoft/callback"
+MICROSOFT_CLIENT_ID = os.environ.get("MICROSOFT_CLIENT_ID", "")
+MICROSOFT_CLIENT_SECRET = os.environ.get("MICROSOFT_CLIENT_SECRET", "")
+MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+
 
 def _cookie_secure() -> bool:
     return os.environ.get("COOKIE_INSECURE") != "1"
@@ -374,12 +380,11 @@ async def auth_google_callback(
             return _error_redirect("domain_conflict")
         return _error_redirect("login_failed")
 
-    # is_new=true → land on /?new=1 so the SPA opens the SMTP onboarding modal
-    # (matches the legacy popup-flow behaviour where setShowSmtpSetup=true).
+    # New users land on /setup so they see the platform-specific setup guide
+    # (Google Workspace outbound gateway or M365 smart host instructions).
     return_to = unsealed.return_to
     if result.is_new:
-        sep = "&" if "?" in return_to else "?"
-        return_to = f"{return_to}{sep}new=1"
+        return_to = "/setup"
 
     redirect = RedirectResponse(url=f"{PUBLIC_ORIGIN}{return_to}", status_code=302)
     # Forward cookies set by _complete_login.
@@ -387,6 +392,200 @@ async def auth_google_callback(
         if hdr_name.lower() == b"set-cookie":
             redirect.raw_headers.append((hdr_name, hdr_val))
     redirect.delete_cookie("oauth_state", path="/api/auth/google/callback")
+    return redirect
+
+
+
+async def _complete_microsoft_login(
+    ms_claims: dict,
+    auth: AuthService,
+    response: Response,
+    background_tasks: BackgroundTasks,
+):
+    microsoft_sub = ms_claims["sub"]
+    email = ms_claims["email"]
+    name = ms_claims.get("name", "")
+    company = name or email.split("@")[0]
+
+    try:
+        result = await auth.login_with_microsoft_claims(
+            microsoft_sub=microsoft_sub,
+            email=email,
+            company_name=company,
+        )
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+    token = create_jwt(result.customer_id, result.email)
+    _set_session_cookies(response, token)
+
+    if result.is_new:
+        background_tasks.add_task(
+            send_welcome_email,
+            email,
+            name or email.split("@")[0],
+            email.split("@")[-1],
+        )
+
+    return result
+
+
+@router.get("/microsoft/start", dependencies=[Depends(rate_limit_auth_ip)])
+async def auth_microsoft_start(request: Request, return_to: str = "/"):
+    """Begin Microsoft Entra ID OAuth redirect flow."""
+    if not MICROSOFT_CLIENT_ID or not MICROSOFT_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="Microsoft OAuth not configured (MICROSOFT_CLIENT_ID/SECRET missing).",
+        )
+
+    if not return_to.startswith("/") or return_to.startswith("//"):
+        return_to = "/"
+
+    state = new_state(return_to=return_to)
+
+    params = {
+        "client_id": MICROSOFT_CLIENT_ID,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "redirect_uri": MICROSOFT_REDIRECT_URI,
+        "state": state.state,
+        "response_mode": "query",
+        "prompt": "select_account",
+    }
+
+    redirect = RedirectResponse(
+        url=f"{MICROSOFT_AUTH_URL}?{urlencode(params)}",
+        status_code=302,
+    )
+    redirect.set_cookie(
+        key="ms_oauth_state",
+        value=seal_state(state),
+        max_age=STATE_TTL_SECONDS,
+        path="/api/auth/microsoft/callback",
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+    )
+    return redirect
+
+
+@router.get("/microsoft/callback")
+async def auth_microsoft_callback(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    auth: AuthService = Depends(get_auth_service),
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    """Handle Microsoft's authorization-code redirect."""
+
+    def _error_redirect(reason: str) -> RedirectResponse:
+        r = RedirectResponse(url=f"{PUBLIC_ORIGIN}/login?error={reason}", status_code=302)
+        r.delete_cookie("ms_oauth_state", path="/api/auth/microsoft/callback")
+        return r
+
+    if error:
+        return _error_redirect(f"ms_{error}")
+    if not code or not state:
+        return _error_redirect("ms_missing_params")
+
+    sealed = request.cookies.get("ms_oauth_state")
+    if not sealed:
+        return _error_redirect("ms_state_missing")
+
+    unsealed = unseal_state(sealed)
+    if unsealed is None:
+        return _error_redirect("ms_state_invalid")
+
+    if not hmac_safe_eq(state, unsealed.state):
+        return _error_redirect("ms_state_mismatch")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            tok_resp = await client.post(
+                MICROSOFT_TOKEN_URL,
+                data={
+                    "code": code,
+                    "client_id": MICROSOFT_CLIENT_ID,
+                    "client_secret": MICROSOFT_CLIENT_SECRET,
+                    "redirect_uri": MICROSOFT_REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                },
+                headers={"Accept": "application/json"},
+            )
+    except httpx.HTTPError as exc:
+        logger.error("microsoft_token_exchange_network_error", extra={"err": str(exc)})
+        return _error_redirect("ms_token_exchange_failed")
+
+    if tok_resp.status_code != 200:
+        safe_err = {}
+        try:
+            j = tok_resp.json()
+            if isinstance(j, dict):
+                for k in ("error", "error_description"):
+                    if k in j:
+                        safe_err[k] = str(j[k])[:200]
+        except Exception:
+            safe_err["parse_error"] = "non-json response"
+        logger.warning(
+            "microsoft_token_exchange_rejected",
+            extra={"status": tok_resp.status_code, "err": safe_err},
+        )
+        return _error_redirect("ms_token_exchange_failed")
+
+    tok = tok_resp.json()
+    access_token = tok.get("access_token")
+    if not access_token:
+        return _error_redirect("ms_no_access_token")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            ui_resp = await client.get(
+                "https://graph.microsoft.com/oidc/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except httpx.HTTPError as exc:
+        logger.error("microsoft_userinfo_network_error", extra={"err": str(exc)})
+        return _error_redirect("ms_userinfo_failed")
+
+    if ui_resp.status_code != 200:
+        return _error_redirect("ms_userinfo_failed")
+
+    ui = ui_resp.json()
+    email = ui.get("email") or ui.get("preferred_username", "")
+    if not email or "@" not in email:
+        return _error_redirect("ms_no_email")
+
+    ms_claims = {
+        "sub": ui.get("sub", ""),
+        "email": email,
+        "name": ui.get("name", ""),
+    }
+
+    response = Response()
+    try:
+        result = await _complete_microsoft_login(ms_claims, auth, response, background_tasks)
+    except HTTPException as exc:
+        logger.info("ms_oauth_login_rejected", extra={"status": exc.status_code, "detail": str(exc.detail)})
+        if exc.status_code == 409:
+            return _error_redirect("ms_account_conflict")
+        return _error_redirect("ms_login_failed")
+
+    # New users land on /setup so they see the M365 smart host setup guide.
+    return_to = unsealed.return_to
+    if result.is_new:
+        return_to = "/setup"
+
+    redirect = RedirectResponse(url=f"{PUBLIC_ORIGIN}{return_to}", status_code=302)
+    for hdr_name, hdr_val in response.raw_headers:
+        if hdr_name.lower() == b"set-cookie":
+            redirect.raw_headers.append((hdr_name, hdr_val))
+    redirect.delete_cookie("ms_oauth_state", path="/api/auth/microsoft/callback")
     return redirect
 
 
