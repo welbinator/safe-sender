@@ -71,6 +71,34 @@
   border-radius: 2px;
 }
 
+
+.msBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 20px;
+  margin-top: 12px;
+  border-radius: 8px;
+  background: #0078d4;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: opacity 0.15s;
+  box-sizing: border-box;
+}
+
+.msBtn:hover {
+  opacity: 0.88;
+}
+
+.msIcon {
+  font-size: 18px;
+  line-height: 1;
+}
+
 .warn {
   color: var(--red);
   font-size: 12px;

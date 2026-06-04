@@ -44,6 +44,12 @@ from .rate_limit import (
     get_write_config,
     is_enabled as rate_limit_enabled,
 )
+from .microsoft_oidc import (
+    MICROSOFT_AUTH_URL,
+    MICROSOFT_CLIENT_ID,
+    MICROSOFT_TOKEN_URL,
+    verify_microsoft_id_token,
+)
 
 __all__ = [
     "JWT_ALGORITHM",
@@ -65,4 +71,8 @@ __all__ = [
     "pkce_challenge",
     "seal_state",
     "unseal_state",
+    "MICROSOFT_AUTH_URL",
+    "MICROSOFT_CLIENT_ID",
+    "MICROSOFT_TOKEN_URL",
+    "verify_microsoft_id_token",
 ]

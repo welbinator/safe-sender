@@ -26,6 +26,18 @@ class CustomerRepository(BaseRepository):
         )
         return _as_dict(row)
 
+    async def get_by_microsoft_sub(self, microsoft_sub: str) -> Optional[dict[str, Any]]:
+        row = await self.conn.fetchrow(
+            "SELECT * FROM customers WHERE microsoft_sub = $1", microsoft_sub
+        )
+        return _as_dict(row)
+
+    async def get_by_email(self, email: str) -> Optional[dict[str, Any]]:
+        row = await self.conn.fetchrow(
+            "SELECT * FROM customers WHERE email = $1", email
+        )
+        return _as_dict(row)
+
     async def get_by_domain(self, domain: str) -> Optional[dict[str, Any]]:
         row = await self.conn.fetchrow(
             "SELECT id FROM customers WHERE domain = $1",
@@ -53,18 +65,20 @@ class CustomerRepository(BaseRepository):
         domain: str,
         name: Optional[str],
         email: str,
-        google_sub: str,
+        google_sub: Optional[str] = None,
         smtp_username: str,
         smtp_password_hash: str,
+        microsoft_sub: Optional[str] = None,
+        auth_provider: str = "google",
     ) -> dict[str, Any]:
         row = await self.conn.fetchrow(
             """
             INSERT INTO customers
-              (domain, name, email, google_sub, plan, smtp_username, smtp_password_hash)
-            VALUES ($1, $2, $3, $4, 'basic', $5, $6)
+              (domain, name, email, google_sub, microsoft_sub, auth_provider, plan, smtp_username, smtp_password_hash)
+            VALUES ($1, $2, $3, $4, $5, $6, 'basic', $7, $8)
             RETURNING id, email
             """,
-            domain, name, email, google_sub, smtp_username, smtp_password_hash,
+            domain, name, email, google_sub, microsoft_sub, auth_provider, smtp_username, smtp_password_hash,
         )
         return dict(row)
 
