@@ -373,6 +373,11 @@ const StepSmtpConfig = ({ domain, authProvider }) => {
               organization, choose <em>"By verifying that the sender domain matches"</em> and
               enter <Code>sendersafety.com</Code>
             </li>
+            <li>
+              Security restrictions: keep <em>"Reject email messages if they aren't sent over TLS"</em> checked,
+              also check <em>"And require that the subject name on the certificate matches"</em> and
+              enter <Code>smtp.sendersafety.com</Code>. Leave the IP address range box unchecked.
+            </li>
             <li>Save the connector</li>
           </ol>
           <Alert type="info" style={{ marginTop: 16 }}>
