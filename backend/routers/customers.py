@@ -57,6 +57,7 @@ class CustomerResponse(BaseModel):
     active: bool
     domain_verified: bool
     domains: list[DomainEntry] = []
+    auth_provider: str = "google"
 
 
 class CustomerUpdate(BaseModel):
@@ -122,6 +123,7 @@ def _to_customer_response(row: dict, domains: list = None) -> CustomerResponse:
         active=row["active"],
         domain_verified=row.get("domain_verified", False),
         domains=domain_entries,
+        auth_provider=row.get("auth_provider", "google"),
     )
 
 
