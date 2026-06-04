@@ -380,12 +380,11 @@ async def auth_google_callback(
             return _error_redirect("domain_conflict")
         return _error_redirect("login_failed")
 
-    # is_new=true → land on /?new=1 so the SPA opens the SMTP onboarding modal
-    # (matches the legacy popup-flow behaviour where setShowSmtpSetup=true).
+    # New users land on /setup so they see the platform-specific setup guide
+    # (Google Workspace outbound gateway or M365 smart host instructions).
     return_to = unsealed.return_to
     if result.is_new:
-        sep = "&" if "?" in return_to else "?"
-        return_to = f"{return_to}{sep}new=1"
+        return_to = "/setup"
 
     redirect = RedirectResponse(url=f"{PUBLIC_ORIGIN}{return_to}", status_code=302)
     # Forward cookies set by _complete_login.
@@ -577,10 +576,10 @@ async def auth_microsoft_callback(
             return _error_redirect("ms_account_conflict")
         return _error_redirect("ms_login_failed")
 
+    # New users land on /setup so they see the M365 smart host setup guide.
     return_to = unsealed.return_to
     if result.is_new:
-        sep = "&" if "?" in return_to else "?"
-        return_to = f"{return_to}{sep}new=1"
+        return_to = "/setup"
 
     redirect = RedirectResponse(url=f"{PUBLIC_ORIGIN}{return_to}", status_code=302)
     for hdr_name, hdr_val in response.raw_headers:

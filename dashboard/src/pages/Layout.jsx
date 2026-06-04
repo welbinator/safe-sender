@@ -1,27 +1,13 @@
-import { useState, useEffect } from 'react';
-import { NavLink, Outlet, useNavigate, useSearchParams } from 'react-router-dom';
+import { useState } from 'react';
+import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import widgetRegistry from '../widgetRegistry';
-import SmtpWelcomeModal from '../components/SmtpWelcomeModal';
 import styles from './Layout.module.css';
 
 export default function Layout() {
   const { customer, logout } = useAuth();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  // F-57: new-user signal moved here from Login.jsx. The OAuth callback lands
-  // brand-new customers at /?new=1 (the legacy GIS popup used to fire this
-  // inline). We read+strip the param so the modal doesn't reappear on reload.
-  const [showSmtpSetup, setShowSmtpSetup] = useState(false);
-  useEffect(() => {
-    if (searchParams.get('new') === '1') {
-      setShowSmtpSetup(true);
-      const next = new URLSearchParams(searchParams);
-      next.delete('new');
-      setSearchParams(next, { replace: true });
-    }
-  }, [searchParams, setSearchParams]);
 
   const handleLogout = () => { logout(); navigate('/login'); };
   const closeDrawer = () => setDrawerOpen(false);
@@ -97,10 +83,6 @@ export default function Layout() {
       <main className={styles.main}>
         <Outlet />
       </main>
-
-      {showSmtpSetup && (
-        <SmtpWelcomeModal onDone={() => setShowSmtpSetup(false)} />
-      )}
 
     </div>
   );
