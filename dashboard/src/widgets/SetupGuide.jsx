@@ -376,14 +376,10 @@ const StepSmtpConfig = ({ domain, authProvider }) => {
               Routing: select <em>"Route email through these smart hosts"</em>, then enter <Code>smtp.sendersafety.com</Code> and click <strong>+</strong>
             </li>
             <li>
-              Security: <strong>Always use TLS</strong> — when asked how to identify the partner
-              organization, choose <em>"By verifying that the sender domain matches"</em> and
-              enter <Code>sendersafety.com</Code>
-            </li>
-            <li>
-              Security restrictions: keep <em>"Reject email messages if they aren't sent over TLS"</em> checked,
-              also check <em>"And require that the subject name on the certificate matches"</em> and
-              enter <Code>smtp.sendersafety.com</Code>. Leave the IP address range box unchecked.
+              Security restrictions: <em>"Always use TLS"</em> should already be checked. Select
+              <em>"Issued by a trusted certificate authority (CA)"</em>, then check
+              <em>"Add the subject name or SAN matches this domain name"</em> and
+              enter <Code>smtp.sendersafety.com</Code>
             </li>
             <li>Save the connector</li>
           </ol>
