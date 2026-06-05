@@ -426,8 +426,12 @@ class CustomerService:
         entry = await self.customers.get_domain_entry(customer["id"], domain)
         if entry and entry.get("verified"):
             return {"token": "already-verified", "txt_name": _VERIFICATION_TXT_LABEL, "txt_value": "already-verified"}
-        token = secrets.token_hex(20)
-        await self.customers.set_domain_verification_token(customer["id"], domain, token)
+        # Reuse existing token if one was already generated — avoids invalidating
+        # a TXT record the customer has already added to their DNS.
+        token = entry.get("verification_token") if entry else None
+        if not token:
+            token = secrets.token_hex(20)
+            await self.customers.set_domain_verification_token(customer["id"], domain, token)
         return {
             "token": token,
             "txt_name": _VERIFICATION_TXT_LABEL,
