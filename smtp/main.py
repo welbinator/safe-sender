@@ -276,8 +276,9 @@ SPF_ENFORCE = os.environ.get("SPF_ENFORCE", "1") not in ("0", "false", "False", 
 # Trusted PTR suffixes — any connecting IP whose reverse-DNS hostname ends in
 # one of these is treated as an authorized relay even if SPF is none/softfail.
 _TRUSTED_PTR_SUFFIXES: tuple[str, ...] = (
-    ".mail.protection.outlook.com",  # Microsoft EOP (all pools incl. HROP)
-    ".google.com",                   # Google Workspace SMTP relay
+    ".mail.protection.outlook.com",     # Microsoft EOP standard pools
+    ".outbound.protection.outlook.com", # Microsoft EOP outbound pools (incl. HROP)
+    ".google.com",                      # Google Workspace SMTP relay
 )
 
 # FQDN validation regex (S-M8 — hardened domain extraction)
@@ -780,6 +781,22 @@ class SafeSenderHandler:
         raw_content: bytes = envelope.content if isinstance(envelope.content, bytes) else envelope.content.encode()
 
         domain = _extract_domain(mail_from)
+
+        # M365 connector validation (and DSN/bounce messages) use a null
+        # envelope sender: MAIL FROM:<>. In that case fall back to the From:
+        # header inside the message body to find the customer's domain.
+        # We do a lightweight header-only parse here — before handle_DATA
+        # completes no body processing has happened yet.
+        if not domain and envelope.content:
+            try:
+                _raw = envelope.content if isinstance(envelope.content, bytes) else envelope.content.encode()
+                _hdr_msg = email_lib.message_from_bytes(_raw, policy=email_policy.default)
+                _from_hdr = _hdr_msg.get("From", "") or ""
+                # From header can be "Name <addr>" or bare "addr"
+                _, _from_addr = email_utils.parseaddr(_from_hdr)
+                domain = _extract_domain(_from_addr)
+            except Exception:
+                pass
         peer_ip = session.peer[0] if session.peer else "unknown"
         logger.info("Incoming email", extra={"port": self.port, "peer": peer_ip, "domain": domain, "to": rcpt_tos})
 
