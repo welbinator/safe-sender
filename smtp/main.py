@@ -883,8 +883,9 @@ if __name__ == "__main__":
         extra={"port": 587, "rate_limit_max": RATE_LIMIT_MAX, "rate_limit_window": RATE_LIMIT_WINDOW},
     )
 
-    # Port 25 - MTA-to-MTA inbound from Google Workspace SMTP relay.
+    # Port 25 - MTA-to-MTA inbound from Google Workspace / Microsoft 365 SMTP relay.
     # No SMTP-AUTH (peer-IP allowlist enforced inside handle_DATA).
+    # STARTTLS is offered opportunistically — required by M365 smart host connectors.
     handler25 = SafeSenderHandler(port=25)
     controller25 = Controller(
         handler25,
@@ -892,6 +893,7 @@ if __name__ == "__main__":
         port=25,
         auth_required=False,
         auth_require_tls=False,
+        tls_context=ssl_context,
     )
     controller25.start()
     logger.info(
