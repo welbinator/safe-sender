@@ -58,6 +58,12 @@ async def create_scan_log(body: ScanLogRequest):
     """
     pool = get_pool()
     bind_sender = os.environ.get("SCAN_LOG_BIND_SENDER", "1") == "1"
+    # Null envelope senders (<> or empty) are RFC-compliant for DSNs, probes,
+    # and connector-validation messages.  There's no domain to bind against, so
+    # skip the customer-domain check for these — the IP-level auth already ran.
+    _raw_sender = body.sender.strip().strip("<>")
+    if bind_sender and "@" not in _raw_sender:
+        bind_sender = False
     if bind_sender:
         sender_domain = body.sender.rsplit("@", 1)[-1].lower().strip()
         async with pool.acquire() as conn:
