@@ -372,7 +372,9 @@ const StepSmtpConfig = ({ domain, authProvider }) => {
               Use of connector: select <em>"Only when email messages are sent to these domains"</em>,
               type <Code>*</Code> in the box and click <strong>+</strong> — this routes all outbound email through the connector
             </li>
-            <li>Routing: Route through these smart hosts → <Code>smtp.sendersafety.com</Code></li>
+            <li>
+              Routing: select <em>"Route email through these smart hosts"</em>, then enter <Code>smtp.sendersafety.com</Code> and click <strong>+</strong>
+            </li>
             <li>
               Security: <strong>Always use TLS</strong> — when asked how to identify the partner
               organization, choose <em>"By verifying that the sender domain matches"</em> and
