@@ -365,7 +365,11 @@ const StepSmtpConfig = ({ domain, authProvider }) => {
                 style={{ color: '#6c63ff' }}>Exchange Admin Center</a>
             </li>
             <li>Go to <strong>Mail flow → Connectors → + Add a connector</strong></li>
-            <li>Connection from: <strong>Office 365</strong> → Connection to: <strong>Partner organization</strong></li>
+            <li>
+              ⚠️ <strong>Direction matters:</strong> Connection from must be <strong>Office 365</strong>,
+              Connection to must be <strong>Partner organization</strong>.
+              (If it says "From: Partner organization" you have it backwards — this controls inbound, not outbound.)
+            </li>
             <li>Name: <em>Sender Safety outbound filter</em></li>
             <li>Routing: Route through these smart hosts → <Code>smtp.sendersafety.com</Code></li>
             <li>
