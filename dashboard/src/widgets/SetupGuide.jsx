@@ -368,6 +368,10 @@ const StepSmtpConfig = ({ domain, authProvider }) => {
             <li>Connection from: select <strong>Office 365</strong></li>
             <li>Connection to: select <strong>Partner organization</strong></li>
             <li>Name: <em>Sender Safety outbound filter</em></li>
+            <li>
+              Use of connector: select <em>"Only when email messages are sent to these domains"</em>,
+              type <Code>*</Code> in the box and click <strong>+</strong> — this routes all outbound email through the connector
+            </li>
             <li>Routing: Route through these smart hosts → <Code>smtp.sendersafety.com</Code></li>
             <li>
               Security: <strong>Always use TLS</strong> — when asked how to identify the partner
