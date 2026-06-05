@@ -318,13 +318,25 @@ async def get_rules(domain: str):
     """
     pool = get_pool()
     async with pool.acquire() as conn:
+        # Post multi-domain migration (20260528_0001) the source of truth for
+        # verification is customer_domains.verified.  The legacy
+        # customers.domain_verified column is left in place for backward-compat
+        # but is no longer updated by the verification flow — so we join both
+        # tables and treat the domain as verified when *either* flag is true.
         customer = await conn.fetchrow(
-            "SELECT id, domain_verified, subject_hash_salt FROM customers WHERE domain = $1",
+            """
+            SELECT c.id, c.subject_hash_salt,
+                   (COALESCE(cd.verified, FALSE) OR COALESCE(c.domain_verified, FALSE)) AS is_verified
+            FROM customers c
+            LEFT JOIN customer_domains cd
+                   ON cd.customer_id = c.id AND cd.domain = $1
+            WHERE c.domain = $1
+            """,
             domain.lower(),
         )
         if not customer:
             raise HTTPException(status_code=404, detail="Domain not registered")
-        if not customer["domain_verified"]:
+        if not customer["is_verified"]:
             raise HTTPException(status_code=403, detail="Domain not verified")
 
         customer_id = customer["id"]
