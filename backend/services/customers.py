@@ -165,9 +165,17 @@ class CustomerService:
 
         dns.resolver is blocking, so the lookup runs in a worker thread (H13).
         Any exception (NXDOMAIN, timeout, no answer) is treated as "not yet".
+
+        Uses explicit public nameservers (8.8.8.8, 1.1.1.1) rather than the
+        container's default resolver — Docker's internal resolver returns
+        NXDOMAIN for external TXT records that public DNS can see fine.
         """
+        def _resolve():
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = ["8.8.8.8", "1.1.1.1"]
+            return resolver.resolve(name, "TXT")
         try:
-            answers = await asyncio.to_thread(dns.resolver.resolve, name, "TXT")
+            answers = await asyncio.to_thread(_resolve)
         except Exception:
             return False
         for rdata in answers:
