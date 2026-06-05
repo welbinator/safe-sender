@@ -31,6 +31,7 @@ import threading
 import time
 import unicodedata
 from email import policy as email_policy
+from email import utils as email_utils
 
 import aiohttp
 import requests
@@ -235,17 +236,60 @@ def _internal_headers() -> dict[str, str]:
         return _INTERNAL_HEADERS
     return {**_INTERNAL_HEADERS, "X-Request-Id": rid}
 
-# Comma-separated CIDR ranges allowed to connect on port 25 (Google SMTP relay
-# MTA->MTA). Defaults to Google's published _spf.google.com ranges as of 2025;
-# operators should keep this updated via env.
-DEFAULT_GOOGLE_RELAY_RANGES = (
-    "35.190.247.0/24,64.233.160.0/19,66.102.0.0/20,66.249.80.0/20,"
-    "72.14.192.0/18,74.125.0.0/16,108.177.8.0/21,108.177.96.0/19,"
-    "172.217.0.0/19,172.217.32.0/20,172.217.128.0/19,172.217.160.0/20,"
-    "172.217.192.0/19,173.194.0.0/16,209.85.128.0/17,216.58.192.0/19,"
-    "216.239.32.0/19"
+import spf as _spf  # pyspf — RFC 7208 SPF lookups
+
+# ---------------------------------------------------------------------------
+# S-H1 — Port-25 access control: SPF + PTR (replaces static CIDR allowlist)
+# ---------------------------------------------------------------------------
+#
+# PRIMARY GATE: SPF check against the sender's domain.
+#   The connecting IP must appear in the SPF record published by the MAIL FROM
+#   domain. Since every customer already adds spf.protection.outlook.com or
+#   _spf.google.com to their domain SPF record as part of setup, this check
+#   is self-maintaining — when Google or Microsoft add new IPs they update
+#   their own SPF records, and our check picks it up automatically at runtime.
+#
+# PTR FALLBACK: for IPs that return SPF `none` / `softfail` (e.g. Microsoft's
+#   HighRiskOutboundPool, which is deliberately excluded from published EOP
+#   SPF records), we do a reverse-DNS lookup. If the PTR hostname ends in a
+#   trusted suffix (.mail.protection.outlook.com or .google.com) we allow it.
+#   Microsoft always names their sending infrastructure under these suffixes,
+#   regardless of which IP pool they use.
+#
+# LEGACY CIDR FALLBACK: PORT25_ALLOWED_CIDRS is kept as a third-tier escape
+#   hatch. Existing env var config continues to work unchanged, and operators
+#   can still add one-off ranges for on-prem relay customers that have no SPF.
+#
+# Policy summary (SPF result → action):
+#   pass                → allow ✓
+#   none / neutral      → try PTR fallback, then CIDR fallback, then reject
+#   softfail            → try PTR fallback, then CIDR fallback, then allow
+#                         (log warning; some legit relays softfail)
+#   fail                → reject 550 5.7.23 (verified forgery)
+#   temperror           → allow (fail-open; flaky DNS ≠ DoS vector)
+#   permerror           → log warning, fall through to PTR/CIDR fallback
+#
+# Kill-switch: SPF_ENFORCE=0 disables SPF+PTR and falls back to CIDR-only.
+
+SPF_ENFORCE = os.environ.get("SPF_ENFORCE", "1") not in ("0", "false", "False", "")
+
+# Trusted PTR suffixes — any connecting IP whose reverse-DNS hostname ends in
+# one of these is treated as an authorized relay even if SPF is none/softfail.
+_TRUSTED_PTR_SUFFIXES: tuple[str, ...] = (
+    ".mail.protection.outlook.com",  # Microsoft EOP (all pools incl. HROP)
+    ".google.com",                   # Google Workspace SMTP relay
 )
-PORT25_ALLOWED_CIDRS = os.environ.get("PORT25_ALLOWED_CIDRS", DEFAULT_GOOGLE_RELAY_RANGES)
+
+# FQDN validation regex (S-M8 — hardened domain extraction)
+_FQDN_RE = _stdlib_re.compile(
+    r"^(?=.{1,253}$)(?!-)[A-Z0-9-]{1,63}(?<!-)(?:\.(?!-)[A-Z0-9-]{1,63}(?<!-))+$",
+    _stdlib_re.IGNORECASE,
+)
+
+# Legacy CIDR allowlist — kept as escape hatch for on-prem relay customers.
+# Default is empty (SPF+PTR handles Google and Microsoft automatically).
+# Set PORT25_ALLOWED_CIDRS in env to add one-off ranges.
+PORT25_ALLOWED_CIDRS = os.environ.get("PORT25_ALLOWED_CIDRS", "")
 _PORT25_NETWORKS = [
     ipaddress.ip_network(c.strip(), strict=False)
     for c in PORT25_ALLOWED_CIDRS.split(",") if c.strip()
@@ -358,11 +402,81 @@ async def _send_admin_alert_async(subject: str, body: str, key: str = "default")
 # ---------------------------------------------------------------------------
 
 def _extract_domain(address: str) -> str:
-    """Return the domain part of an email address like 'user@example.com'."""
-    address = address.strip("<>").strip()
-    if "@" in address:
-        return address.split("@", 1)[1].lower()
-    return address.lower()
+    """Return the domain part of an email address, lowercased.
+
+    S-M8 — hardened version. Uses email.utils.parseaddr so quoted local-parts
+    are honored, then validates the domain against the FQDN regex.  Returns ""
+    for any input that fails validation — callers treat "" as reject.
+    """
+    if not address:
+        return ""
+    address = address.strip().strip("<>").strip()
+    if not address:
+        return ""
+    _, parsed = email_utils.parseaddr(address)
+    if not parsed or "@" not in parsed:
+        return ""
+    local, _, domain = parsed.rpartition("@")
+    if not local or not domain:
+        return ""
+    domain = domain.lower().rstrip(".")
+    if not _FQDN_RE.match(domain):
+        return ""
+    return domain
+
+
+def _check_spf_sync(peer_ip: str, mail_from: str, helo: str) -> tuple[str, str]:
+    """Synchronous SPF lookup via pyspf.  Returns (result, explanation).
+
+    Wrapped via asyncio.to_thread by the async caller so the event loop is
+    never blocked by DNS I/O.
+    """
+    try:
+        result, explanation = _spf.check2(i=peer_ip, s=mail_from, h=helo or "unknown")
+        return str(result or "").lower(), str(explanation or "")
+    except Exception as exc:
+        return "temperror", f"spf-check raised: {exc}"
+
+
+async def _check_spf(peer_ip: str, mail_from: str, helo: str) -> tuple[str, str]:
+    """Async SPF wrapper.  Returns ("", "") when SPF_ENFORCE is off."""
+    if not SPF_ENFORCE:
+        return ("", "")
+    if not mail_from or not peer_ip or peer_ip == "unknown":
+        return ("none", "missing peer or sender")
+    try:
+        ipaddress.ip_address(peer_ip)
+    except ValueError:
+        return ("none", "peer not an IP literal")
+    return await asyncio.to_thread(_check_spf_sync, peer_ip, mail_from, helo)
+
+
+def _ptr_trusted_sync(peer_ip: str) -> bool:
+    """Return True if the reverse-DNS hostname of peer_ip ends in a trusted suffix.
+
+    Runs synchronously — wrap in asyncio.to_thread at call site.
+    Swallows all DNS exceptions (NXDOMAIN, timeout, etc.) and returns False.
+    """
+    try:
+        import dns.resolver as _dns_resolver
+        import dns.reversename as _dns_rev
+        resolver = _dns_resolver.Resolver()
+        resolver.nameservers = ["8.8.8.8", "1.1.1.1"]
+        resolver.lifetime = 5.0
+        rev_name = _dns_rev.from_address(peer_ip)
+        answers = resolver.resolve(rev_name, "PTR")
+        for rdata in answers:
+            hostname = str(rdata.target).rstrip(".").lower()
+            if any(hostname.endswith(suffix) for suffix in _TRUSTED_PTR_SUFFIXES):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _check_ptr_trusted(peer_ip: str) -> bool:
+    """Async wrapper around _ptr_trusted_sync."""
+    return await asyncio.to_thread(_ptr_trusted_sync, peer_ip)
 
 
 def _get_text_body(msg) -> str:
@@ -594,14 +708,63 @@ class SafeSenderHandler:
     def __init__(self, port: int):
         self.port = port
 
-    def _peer_allowed_on_port25(self, peer) -> bool:
-        if not peer:
-            return False
+    async def _port25_authorized(self, peer_ip: str, mail_from: str, helo: str) -> tuple[bool, str]:
+        """Three-tier port-25 authorization.  Returns (allowed, reason_for_log).
+
+        Tier 1 — SPF: check if peer_ip is authorized by the MAIL FROM domain's
+                  SPF record.  Self-maintaining: Google/Microsoft keep their own
+                  records up to date.  Hard `fail` → reject immediately.
+
+        Tier 2 — PTR: for SPF none/softfail/permerror (e.g. Microsoft HROP,
+                  which is excluded from published EOP SPF on purpose), check
+                  reverse-DNS.  Trusted suffixes (.mail.protection.outlook.com,
+                  .google.com) → allow.
+
+        Tier 3 — CIDR: legacy escape hatch.  PORT25_ALLOWED_CIDRS env var
+                  (default empty).  Allows on-prem relay customers that have
+                  no SPF record.
+
+        Returns (False, reason) only when all three tiers deny the connection.
+        SPF_ENFORCE=0 skips tiers 1+2 and falls straight to tier 3 (CIDR-only,
+        legacy behaviour).
+        """
+        if not SPF_ENFORCE:
+            # Kill-switch: fall back to CIDR-only (legacy behaviour).
+            try:
+                ip = ipaddress.ip_address(peer_ip)
+                if any(ip in net for net in _PORT25_NETWORKS):
+                    return True, "cidr-match (spf-enforce=off)"
+            except ValueError:
+                pass
+            return False, "no-cidr-match (spf-enforce=off)"
+
+        # Tier 1 — SPF
+        spf_result, spf_reason = await _check_spf(peer_ip, mail_from, helo)
+        if spf_result == "fail":
+            return False, f"spf-fail: {spf_reason}"
+        if spf_result == "pass":
+            return True, "spf-pass"
+        if spf_result == "temperror":
+            return True, f"spf-temperror (fail-open): {spf_reason}"
+
+        # Tier 2 — PTR (covers none/neutral/softfail/permerror)
+        ptr_trusted = await _check_ptr_trusted(peer_ip)
+        if ptr_trusted:
+            return True, f"ptr-trusted (spf={spf_result})"
+
+        # Tier 3 — CIDR legacy fallback
         try:
-            ip = ipaddress.ip_address(peer[0])
-        except (ValueError, IndexError):
-            return False
-        return any(ip in net for net in _PORT25_NETWORKS)
+            ip = ipaddress.ip_address(peer_ip)
+            if any(ip in net for net in _PORT25_NETWORKS):
+                return True, f"cidr-match (spf={spf_result})"
+        except ValueError:
+            pass
+
+        # softfail: allow but only after PTR+CIDR both missed — log clearly
+        if spf_result == "softfail":
+            return True, f"spf-softfail allowed (no ptr/cidr match): {spf_reason}"
+
+        return False, f"denied: spf={spf_result}, no ptr/cidr match"
 
     async def handle_RCPT(self, server, session, envelope, address: str, rcpt_options: list) -> str:
         envelope.rcpt_tos.append(address)
@@ -622,12 +785,18 @@ class SafeSenderHandler:
 
         # --- Port-specific access control ------------------------------------
         if self.port == 25:
-            if not self._peer_allowed_on_port25(session.peer):
+            helo = getattr(session, "host_name", "") or ""
+            allowed, auth_reason = await self._port25_authorized(peer_ip, mail_from, helo)
+            if not allowed:
                 logger.warning(
-                    "Port 25 connection from non-allowlisted IP — rejected",
-                    extra={"peer": peer_ip, "domain": domain},
+                    "Port 25 connection denied",
+                    extra={"peer": peer_ip, "domain": domain, "reason": auth_reason},
                 )
                 return "550 5.7.1 Connections only accepted from authorized relay IPs"
+            logger.info(
+                "Port 25 connection authorized",
+                extra={"peer": peer_ip, "domain": domain, "reason": auth_reason},
+            )
         else:
             # Port 587: must be authenticated
             if not getattr(session, "smtp_customer_id", None) and not getattr(session, "smtp_admin", False):

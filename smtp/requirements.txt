@@ -7,3 +7,6 @@ requests==2.34.2
 google-re2==1.1.20251105
 pytest==9.0.3
 pytest-asyncio==1.3.0
+# S-H1 — SPF + PTR authorization for port-25 inbound (self-maintaining, no CIDR list)
+pyspf==2.0.14
+dnspython==2.6.1
