@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -22,10 +23,21 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "60"))
 
 SYSTEM_PROMPT = (
-    "You are a strict outbound email compliance scanner for a financial/professional services firm. "
-    "You will be given a set of plain-English compliance policies and an email to review. "
-    "Respond ONLY with a JSON object — no explanation, no markdown, just JSON. "
-    'Format: {"decision": "pass" or "flag", "confidence": 0-100, "reason": "one sentence"}'
+    "You are a precise outbound email compliance reviewer. "
+    "Your job is to decide whether an email clearly violates a compliance policy. "
+    "You must reason carefully before deciding. "
+    "IMPORTANT RULES:\n"
+    "- Only flag an email if you find EXPLICIT, UNAMBIGUOUS evidence of a violation in the email text itself.\n"
+    "- Do NOT make assumptions or inferences beyond what is directly stated.\n"
+    "- A common first name (e.g. 'Joe', 'Mike', 'Donald') without additional context identifying that person "
+    "as a political figure is NOT a violation.\n"
+    "- When in doubt, pass. A false positive that blocks a legitimate email is worse than a false negative.\n"
+    "- Minor misspellings of a clearly identifiable name (e.g. 'Joe Byden') still count as that name.\n"
+    "Respond in this exact format:\n"
+    "REASONING: <think through each policy against the email — cite specific words or phrases that are or are not violations>\n"
+    "VERDICT: <'flag' or 'pass'>\n"
+    "CONFIDENCE: <0-100 — use 100 only for unambiguous violations, lower for anything borderline>\n"
+    "REASON: <one sentence explaining the verdict>"
 )
 
 
@@ -58,7 +70,7 @@ def scan_email(
         f"EMAIL TO REVIEW:\n"
         f"Subject: {subject[:500]}\n"
         f"Body: {body[:3000]}\n\n"
-        "Respond with JSON only."
+        "Review the email against each policy. Show your reasoning, then give your verdict."
     )
 
     payload = json.dumps({
@@ -66,7 +78,8 @@ def scan_email(
         "system": SYSTEM_PROMPT,
         "prompt": prompt,
         "stream": False,
-        "format": "json",
+        # NOTE: no "format": "json" — that suppresses chain-of-thought reasoning.
+        # We parse the structured text response ourselves below.
         "keep_alive": "1h",
         "options": {"temperature": 0, "num_ctx": 4096},
     }).encode()
@@ -86,15 +99,24 @@ def scan_email(
         logger.warning("Ollama error — AI scan skipped", extra={"error": str(exc)})
         return None
 
+    logger.debug("AI raw response", extra={"response": raw[:500]})
+
     try:
-        cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
-        data = json.loads(cleaned)
-        decision = str(data.get("decision", "pass")).lower()
-        if decision not in ("pass", "flag"):
-            decision = "pass"
-        confidence = min(100, max(0, int(data.get("confidence", 50))))
-        reason = str(data.get("reason", ""))[:500]
+        # Parse structured text response
+        verdict_match = re.search(r"VERDICT:\s*(flag|pass)", raw, re.IGNORECASE)
+        confidence_match = re.search(r"CONFIDENCE:\s*(\d+)", raw, re.IGNORECASE)
+        reason_match = re.search(r"REASON:\s*(.+?)(?:\n|$)", raw, re.IGNORECASE)
+
+        if not verdict_match:
+            logger.warning("AI response missing VERDICT field", extra={"raw": raw[:300]})
+            return None
+
+        decision = verdict_match.group(1).lower()
+        confidence = min(100, max(0, int(confidence_match.group(1)))) if confidence_match else 50
+        reason = reason_match.group(1).strip()[:500] if reason_match else ""
+
         return AIScanResult(decision=decision, confidence=confidence, reason=reason)
+
     except Exception as exc:
-        logger.warning("AI response parse failed", extra={"error": str(exc), "raw": raw[:200]})
+        logger.warning("AI response parse failed", extra={"error": str(exc), "raw": raw[:300]})
         return None
