@@ -129,7 +129,7 @@ def test_m4_oauth_error_log_does_not_include_raw_body():
 # ---------------------------------------------------------------------------
 
 def test_m5_scan_log_customer_id_rejects_garbage():
-    from main import ScanLogRequest
+    from routers.internal_scan import ScanLogRequest
     with pytest.raises(Exception):
         ScanLogRequest(
             customer_id="not-a-uuid",
@@ -141,7 +141,7 @@ def test_m5_scan_log_customer_id_rejects_garbage():
 
 
 def test_m5_scan_log_customer_id_accepts_uuid():
-    from main import ScanLogRequest
+    from routers.internal_scan import ScanLogRequest
     cid = uuid4()
     req = ScanLogRequest(
         customer_id=str(cid),
@@ -156,7 +156,7 @@ def test_m5_scan_log_customer_id_accepts_uuid():
 def test_m5_scan_log_handler_has_bind_check():
     """The /internal/scan-log handler must read SCAN_LOG_BIND_SENDER."""
     import main
-    src = inspect.getsource(main.create_scan_log)
+    from routers import internal_scan; src = inspect.getsource(internal_scan.create_scan_log)
     assert "SCAN_LOG_BIND_SENDER" in src
     assert "scan_log_sender_customer_mismatch" in src
 
@@ -166,8 +166,8 @@ def test_m5_scan_log_handler_has_bind_check():
 # ---------------------------------------------------------------------------
 
 def test_m6_suppression_endpoint_has_kill_switch():
-    import main
-    src = inspect.getsource(main.check_suppressed)
+    from routers import internal_suppression
+    src = inspect.getsource(internal_suppression.check_suppressed)
     assert "SUPPRESSION_LEGACY_NULL" in src
     # Legacy path must still allow NULL rows; strict path must not.
     legacy, _, strict = src.partition("else:")

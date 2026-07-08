@@ -106,12 +106,13 @@ export default function ScanLog() {
               <th>To</th>
               <th>Outcome</th>
               <th>Rule Triggered</th>
+              <th>AI Reason</th>
             </tr>
           </thead>
           <tbody>
-            {loading && <SkeletonRows rows={6} cols={5} />}
+            {loading && <SkeletonRows rows={6} cols={6} />}
             {!loading && logs.length === 0 && (
-              <tr><td colSpan={5} className={styles.empty}>No logs found.</td></tr>
+              <tr><td colSpan={6} className={styles.empty}>No logs found.</td></tr>
             )}
             {!loading && logs.map((log) => (
               <tr key={log.id}>
@@ -124,6 +125,14 @@ export default function ScanLog() {
                   </span>
                 </td>
                 <td className={styles.rule}>{ruleLabel(log)}</td>
+                <td className={styles.aiReason}>
+                  {log.ai_decision ? (
+                    <span title={log.ai_reason || ''}>
+                      {log.ai_decision === 'flag' ? '⚑ flagged' : '✓ passed'}
+                      {log.ai_confidence ? ` ${log.ai_confidence}%` : ''}
+                    </span>
+                  ) : <span className={styles.dim}>â</span>}
+                </td>
               </tr>
             ))}
           </tbody>

@@ -69,6 +69,8 @@ def test_rules_endpoint_returns_encrypted_salt(client, monkeypatch):
     fake_customer = {
         "id": "cust-123",
         "domain_verified": True,
+        "is_verified": True,
+        "ai_scan_enabled": False,
         "subject_hash_salt": b"\x11" * 32,
     }
     fake_conn = MagicMock()

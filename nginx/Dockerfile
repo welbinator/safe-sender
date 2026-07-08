@@ -45,4 +45,10 @@ COPY --from=dashboard-build /build/dist/ /usr/share/nginx/html/
 # Sanity check: fail the build if index.html is missing.
 RUN test -f /usr/share/nginx/html/index.html
 
+# Owner performance dashboard — served at /owner/
+# Kept outside the SPA root so it is never part of the React app bundle.
+RUN mkdir -p /usr/share/nginx/html/owner
+COPY nginx/owner-dashboard.html /usr/share/nginx/html/owner/index.html
+RUN chmod 644 /usr/share/nginx/html/owner/index.html
+
 EXPOSE 80 443

@@ -31,8 +31,13 @@ def extract_customer_id_tag(event_data: dict[str, Any]) -> Optional[str]:
     Malformed tags are logged but downgraded to None so we still write a
     legacy (NULL customer_id) suppression row rather than dropping it.
     """
-    user_vars = (event_data or {}).get("user-variables") or {}
+    data = event_data or {}
+    user_vars = data.get("user-variables") or data.get("tags") or {}
     candidate = user_vars.get("customer_id") or user_vars.get("customerId")
+    if not candidate:
+        return None
+    if isinstance(candidate, list):
+        candidate = candidate[0] if candidate else None
     if not candidate:
         return None
     candidate = str(candidate).strip() or None
@@ -57,6 +62,25 @@ def emails_and_reason(
       - "failed" + severity "permanent"  → hard bounce → suppress
       - "complained"                      → spam complaint → suppress
     """
+    # SNS legacy format (notificationType)
+    notification_type = (event_data or {}).get("notificationType", "")
+    if notification_type == "Bounce":
+        bounce = (event_data or {}).get("bounce") or {}
+        bounce_type = bounce.get("bounceType", "")
+        sub_type = bounce.get("bounceSubType", "")
+        recipients = bounce.get("bouncedRecipients") or []
+        emails = [r.get("emailAddress", "").lower() for r in recipients if r.get("emailAddress")]
+        if bounce_type == "Permanent":
+            return emails, "bounce", f"{bounce_type}/{sub_type}", True
+        return [], "", f"{bounce_type}/{sub_type}", True
+    if notification_type == "Complaint":
+        complaint = (event_data or {}).get("complaint") or {}
+        recipients = complaint.get("complainedRecipients") or []
+        emails = [r.get("emailAddress", "").lower() for r in recipients if r.get("emailAddress")]
+        detail = complaint.get("complaintFeedbackType", "abuse")
+        return emails, "complaint", detail, True
+
+    # Mailgun format (event key)
     event_type = (event_data or {}).get("event", "")
 
     if event_type == "failed":

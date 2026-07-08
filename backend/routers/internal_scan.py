@@ -35,6 +35,10 @@ class ScanLogRequest(BaseModel):
     # Accept-and-discard remains for one rollout window so an older SMTP worker
     # POSTing the field doesn't 422; safe to delete after all SMTP workers ship.
     subject: Optional[str] = Field(default=None, max_length=998, deprecated=True)
+    ai_decision: Optional[str] = Field(default=None, max_length=16)
+    ai_confidence: Optional[float] = None
+    ai_reason: Optional[str] = Field(default=None, max_length=500)
+    processing_ms: Optional[int] = None
 
     @field_validator("outcome")
     @classmethod
@@ -84,7 +88,7 @@ async def create_scan_log(body: ScanLogRequest):
             )
         if domain_row is None:
             logger.warning(
-                "scan_log_sender_domain_not_verified",
+                "scan_log_sender_customer_mismatch",
                 extra={
                     "customer_id": str(body.customer_id),
                     "sender_domain": sender_domain,
@@ -98,8 +102,9 @@ async def create_scan_log(body: ScanLogRequest):
         await conn.execute(
             """
             INSERT INTO scan_logs
-                (customer_id, sender, recipient, subject_hash, matched_rule_id, outcome)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (customer_id, sender, recipient, subject_hash, matched_rule_id, outcome,
+                 ai_decision, ai_confidence, ai_reason, processing_ms)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             body.customer_id,
             body.sender,
@@ -107,5 +112,9 @@ async def create_scan_log(body: ScanLogRequest):
             body.subject_hash,
             body.matched_rule_id,
             body.outcome,
+            body.ai_decision,
+            body.ai_confidence,
+            body.ai_reason,
+            body.processing_ms,
         )
     return {"status": "logged"}

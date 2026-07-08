@@ -119,3 +119,7 @@
 .rule  { max-width: 220px; }
 
 \n.ruleName { color: var(--text-1); font-weight: 500; font-size: 13px; }
+
+.aiReason { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.aiReason span[title] { cursor: help; }
+

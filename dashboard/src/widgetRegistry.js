@@ -8,6 +8,7 @@ import ScanLog from './widgets/ScanLog';
 import Stats from './widgets/Stats';
 import SetupGuide from './widgets/SetupGuide';
 import SmtpCredentials from './widgets/SmtpCredentials';
+import AiPolicies from './widgets/AiPolicies';
 
 const widgetRegistry = [
   {
@@ -33,6 +34,12 @@ const widgetRegistry = [
     label: 'SMTP Credentials',
     route: '/smtp',
     Component: SmtpCredentials,
+  },
+  {
+    id: 'ai',
+    label: 'AI Scan',
+    route: '/ai',
+    Component: AiPolicies,
   },
   {
     id: 'setup',

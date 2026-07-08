@@ -57,6 +57,7 @@ class ScanLogRepository(BaseRepository):
             SELECT
                 l.id, l.sender, l.recipient, l.outcome,
                 l.matched_rule_id, l.created_at,
+                l.ai_decision, l.ai_confidence, l.ai_reason,
                 r.name        AS matched_rule_name,
                 r.pattern     AS matched_rule_pattern,
                 r.description AS matched_rule_description

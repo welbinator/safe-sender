@@ -29,6 +29,11 @@ from services.webhooks import MailgunWebhookService
 
 logger = logging.getLogger(__name__)
 
+# Module-level set for tracking fire-and-forget asyncio tasks.
+# Holding a strong reference prevents the GC from collecting tasks mid-flight.
+# Pattern: task = asyncio.create_task(coro()); _BACKGROUND_TASKS.add(task); task.add_done_callback(_BACKGROUND_TASKS.discard)
+_BACKGROUND_TASKS: set = set()
+
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 _SIGNING_KEY = os.environ.get("MAILGUN_WEBHOOK_SIGNING_KEY", "")

@@ -318,3 +318,178 @@ async def list_audit(
         }
         for r in rows
     ]
+
+
+@router.get("/performance")
+async def performance(
+    request: Request,
+    days: int = 30,
+    ip: str = Depends(_require_admin),
+    admin: AdminService = Depends(get_admin_service),
+):
+    """Owner performance dashboard data.
+
+    Returns:
+      - daily_volume: emails/day for the last `days` days (allowed + blocked)
+      - timing: avg and p95 processing_ms per day (only rows with timing data)
+      - customer_breakdown: per-customer totals for the period
+      - summary: headline numbers for the whole period
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        # ── Daily volume + block rate ────────────────────────────────────────
+        daily_rows = await conn.fetch(
+            """
+            SELECT
+                date_trunc('day', created_at AT TIME ZONE 'UTC') AS day,
+                COUNT(*)                                           AS total,
+                COUNT(*) FILTER (WHERE outcome = 'blocked')       AS blocked,
+                COUNT(*) FILTER (WHERE outcome = 'allowed')       AS allowed
+            FROM scan_logs
+            WHERE created_at >= NOW() - ($1 || ' days')::interval
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            str(days),
+        )
+
+        # ── Daily timing (avg + p95) ─────────────────────────────────────────
+        timing_rows = await conn.fetch(
+            """
+            SELECT
+                date_trunc('day', created_at AT TIME ZONE 'UTC') AS day,
+                ROUND(AVG(processing_ms))                         AS avg_ms,
+                PERCENTILE_CONT(0.95) WITHIN GROUP
+                    (ORDER BY processing_ms)                      AS p95_ms
+            FROM scan_logs
+            WHERE created_at >= NOW() - ($1 || ' days')::interval
+              AND processing_ms IS NOT NULL
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            str(days),
+        )
+
+        # ── Per-customer breakdown ────────────────────────────────────────────
+        customer_rows = await conn.fetch(
+            """
+            SELECT
+                c.id,
+                c.domain,
+                c.email,
+                COUNT(*)                                            AS total,
+                COUNT(*) FILTER (WHERE sl.outcome = 'blocked')     AS blocked,
+                COUNT(*) FILTER (WHERE sl.outcome = 'allowed')     AS allowed,
+                ROUND(AVG(sl.processing_ms))                       AS avg_ms,
+                MAX(sl.created_at)                                  AS last_seen
+            FROM scan_logs sl
+            JOIN customers c ON c.id = sl.customer_id
+            WHERE sl.created_at >= NOW() - ($1 || ' days')::interval
+            GROUP BY c.id, c.domain, c.email
+            ORDER BY total DESC
+            """,
+            str(days),
+        )
+
+        # ── Summary totals ────────────────────────────────────────────────────
+        summary_row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)                                          AS total,
+                COUNT(*) FILTER (WHERE outcome = 'blocked')      AS blocked,
+                COUNT(*) FILTER (WHERE outcome = 'allowed')      AS allowed,
+                ROUND(AVG(processing_ms))                        AS avg_ms,
+                ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP
+                    (ORDER BY processing_ms)::numeric, 0)        AS p95_ms,
+                COUNT(DISTINCT customer_id)                      AS active_customers
+            FROM scan_logs
+            WHERE created_at >= NOW() - ($1 || ' days')::interval
+            """,
+            str(days),
+        )
+
+
+        # -- Recent emails (last 10, no date filter) --
+        recent_rows = await conn.fetch(
+            """
+            SELECT
+                sl.sender,
+                sl.recipient,
+                sl.outcome,
+                sl.processing_ms,
+                sl.created_at,
+                sl.ai_decision,
+                sl.ai_confidence,
+                COALESCE(r.name, r.pattern) AS rule_triggered,
+                c.domain
+            FROM scan_logs sl
+            JOIN customers c ON c.id = sl.customer_id
+            LEFT JOIN rules r ON r.id = sl.matched_rule_id
+            ORDER BY sl.created_at DESC
+            LIMIT 10
+            """
+        )
+
+    await _audit_ok(admin, request, ip, 200, {"days": days})
+
+    return {
+        "period_days": days,
+        "summary": {
+            "total": summary_row["total"],
+            "blocked": summary_row["blocked"],
+            "allowed": summary_row["allowed"],
+            "block_rate_pct": round(
+                (summary_row["blocked"] / summary_row["total"] * 100), 1
+            ) if summary_row["total"] else 0,
+            "avg_ms": summary_row["avg_ms"],
+            "p95_ms": summary_row["p95_ms"],
+            "active_customers": summary_row["active_customers"],
+        },
+        "daily_volume": [
+            {
+                "day": r["day"].strftime("%Y-%m-%d"),
+                "total": r["total"],
+                "blocked": r["blocked"],
+                "allowed": r["allowed"],
+            }
+            for r in daily_rows
+        ],
+        "daily_timing": [
+            {
+                "day": r["day"].strftime("%Y-%m-%d"),
+                "avg_ms": int(r["avg_ms"]) if r["avg_ms"] else None,
+                "p95_ms": int(r["p95_ms"]) if r["p95_ms"] else None,
+            }
+            for r in timing_rows
+        ],
+        "customer_breakdown": [
+            {
+                "id": str(r["id"]),
+                "domain": r["domain"],
+                "email": r["email"],
+                "total": r["total"],
+                "blocked": r["blocked"],
+                "allowed": r["allowed"],
+                "block_rate_pct": round(
+                    (r["blocked"] / r["total"] * 100), 1
+                ) if r["total"] else 0,
+                "avg_ms": int(r["avg_ms"]) if r["avg_ms"] else None,
+                "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+            }
+            for r in customer_rows
+        ],
+        "recent_emails": [
+            {
+                "sender": r["sender"],
+                "recipient": r["recipient"],
+                "outcome": r["outcome"],
+                "processing_ms": r["processing_ms"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "ai_decision": r["ai_decision"],
+                "ai_confidence": r["ai_confidence"],
+                "rule_triggered": r["rule_triggered"],
+                "domain": r["domain"],
+            }
+            for r in recent_rows
+        ],
+    }

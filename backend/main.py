@@ -239,7 +239,7 @@ async def shutdown():
 # ---------------------------------------------------------------------------
 # Register Sprint 3 routers
 # ---------------------------------------------------------------------------
-from routers import admin, auth, customers, logs, rules, webhooks  # noqa: E402
+from routers import admin, ai_policies, auth, customers, logs, rules, webhooks  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(customers.router)
@@ -247,6 +247,7 @@ app.include_router(rules.router)
 app.include_router(logs.router)
 app.include_router(webhooks.router)
 app.include_router(admin.router)
+app.include_router(ai_policies.router)
 
 
 # ---------------------------------------------------------------------------
@@ -374,9 +375,21 @@ async def get_rules(domain: str):
     salt_hex = bytes(customer["subject_hash_salt"]).hex()
     salt_encrypted = encrypt_field(salt_hex)
 
+    async with pool.acquire() as conn2:
+        ai_row = await conn2.fetchrow(
+            "SELECT ai_scan_enabled FROM customers WHERE id = $1",
+            customer_id,
+        )
+        ai_policy_rows = await conn2.fetch(
+            "SELECT policy_text FROM ai_policies WHERE customer_id = $1 ORDER BY created_at",
+            customer_id,
+        )
+
     return {
         "customer_id": str(customer_id),
         "rules": rules_list,
         "subject_hash_salt": salt_hex,
         "subject_hash_salt_enc": salt_encrypted,
+        "ai_scan_enabled": bool(ai_row["ai_scan_enabled"]) if ai_row else False,
+        "ai_policies": [r["policy_text"] for r in ai_policy_rows],
     }

@@ -18,7 +18,7 @@ def _load_deps_module():
     tests we never call decode_jwt — we just call the helper that pulls the raw
     token string from the request.
     """
-    sys.path.insert(0, '/home/highprrrr/safe-sender/backend')
+    sys.path.insert(0, '/opt/safe-sender/backend')
     # auth_utils refuses to import without a strong JWT_SECRET. Provide one.
     import os
     os.environ.setdefault("JWT_SECRET", "x" * 48)
@@ -58,15 +58,27 @@ def test_extract_token_prefers_cookie():
 
 
 def test_extract_token_falls_back_to_bearer_header():
-    deps = _load_deps_module()
+    import os, sys, importlib
+    os.environ["ALLOW_BEARER_AUTH"] = "1"
+    if "deps" in sys.modules:
+        deps = importlib.reload(sys.modules["deps"])
+    else:
+        deps = _load_deps_module()
     req = _make_request(auth_header="Bearer HEADER_JWT")
     assert deps._extract_token(req, None) == "HEADER_JWT"
+    os.environ["ALLOW_BEARER_AUTH"] = "0"
 
 
 def test_extract_token_accepts_bearer_case_insensitive():
-    deps = _load_deps_module()
+    import os, sys, importlib
+    os.environ["ALLOW_BEARER_AUTH"] = "1"
+    if "deps" in sys.modules:
+        deps = importlib.reload(sys.modules["deps"])
+    else:
+        deps = _load_deps_module()
     req = _make_request(auth_header="bearer HEADER_JWT")
     assert deps._extract_token(req, None) == "HEADER_JWT"
+    os.environ["ALLOW_BEARER_AUTH"] = "0"
 
 
 def test_extract_token_401_when_no_credentials():

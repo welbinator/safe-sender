@@ -124,3 +124,10 @@ export const addDomain = (domain) => api.post('/customers/domains', { domain });
 export const domainVerifyInit = (domain) => api.post(`/customers/domains/${encodeURIComponent(domain)}/verify/init`);
 export const domainVerifyCheck = (domain) => api.post(`/customers/domains/${encodeURIComponent(domain)}/verify/check`);
 export const deleteDomain = (domain) => api.delete(`/customers/domains/${encodeURIComponent(domain)}`);
+// AI Add-On — Sprint 3
+export const getAiStatus = () => api.get('/ai/status');
+export const getAiPolicies = () => api.get('/ai/policies');
+export const createAiPolicy = (policy_text) => api.post('/ai/policies', { policy_text });
+export const deleteAiPolicy = (id) => api.delete(`/ai/policies/${id}`);
+export const enableAiScan = () => api.post('/ai/enable');
+export const disableAiScan = () => api.post('/ai/disable');

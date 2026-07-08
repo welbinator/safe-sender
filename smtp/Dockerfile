@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir --require-hashes -r /app/requirements.lock
 
 # S-L4 — shared F-17 crypto package (single source of truth).
 COPY shared/safesender_crypto /usr/local/lib/python3.12/site-packages/safesender_crypto
+COPY shared/ai_scan.py /app/ai_scan.py
 
 COPY smtp/ /app/
 

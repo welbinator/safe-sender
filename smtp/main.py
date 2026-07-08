@@ -544,12 +544,24 @@ async def _fetch_rules(domain: str) -> dict | None:
     Returns dict with 'customer_id' and 'rules', or None if domain not found.
     """
     url = f"{BACKEND_URL}/internal/rules/{domain}"
-    async with aiohttp.ClientSession(headers=_internal_headers()) as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status in (404, 403):
-                return None
-            resp.raise_for_status()
-            return await resp.json()
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with aiohttp.ClientSession(headers=_internal_headers()) as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status in (404, 403):
+                        return None
+                    resp.raise_for_status()
+                    return await resp.json()
+        except Exception as exc:
+            logger.warning(
+                "fetch_rules failed, will retry",
+                extra={"attempt": attempt, "domain": domain, "error": str(exc)},
+            )
+            if attempt < max_attempts:
+                await asyncio.sleep(2 ** (attempt - 1))  # 1s, 2s, 4s
+    logger.error("fetch_rules gave up after %d attempts for domain %s", max_attempts, domain)
+    return None
 
 
 async def _is_suppressed(customer_id: str, recipient: str) -> bool:
@@ -578,6 +590,10 @@ async def _log_scan(
     subject_hash: str,
     matched_rule_id: int | None,
     outcome: str,
+    ai_decision: str | None = None,
+    ai_confidence: int | None = None,
+    ai_reason: str | None = None,
+    processing_ms: int | None = None,
 ) -> None:
     """POST a scan log entry to the backend (fire-and-forget style, but awaited).
 
@@ -593,15 +609,31 @@ async def _log_scan(
         "subject_hash": subject_hash,
         "matched_rule_id": matched_rule_id,
         "outcome": outcome,
+        "ai_decision": ai_decision,
+        "ai_confidence": ai_confidence,
+        "ai_reason": ai_reason,
+        "processing_ms": processing_ms,
     }
-    try:
-        async with aiohttp.ClientSession(headers=_internal_headers()) as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status not in (200, 201):
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with aiohttp.ClientSession(headers=_internal_headers()) as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status in (200, 201):
+                        return
                     body = await resp.text()
-                    logger.error("scan-log POST failed", extra={"status": resp.status, "body": body})
-    except Exception as exc:
-        logger.error("Failed to post scan log", extra={"error": str(exc)})
+                    logger.warning(
+                        "scan-log POST non-2xx, will retry",
+                        extra={"attempt": attempt, "status": resp.status, "body": body[:200]},
+                    )
+        except Exception as exc:
+            logger.warning(
+                "scan-log POST failed, will retry",
+                extra={"attempt": attempt, "error": str(exc)},
+            )
+        if attempt < max_attempts:
+            await asyncio.sleep(2 ** (attempt - 1))  # 1s, 2s, 4s
+    logger.error("scan-log POST gave up after %d attempts", max_attempts)
 
 
 def _inject_mailgun_tag(raw_content: bytes, customer_id: str) -> bytes:
@@ -776,6 +808,7 @@ class SafeSenderHandler:
         # this coroutine (helpers, aiohttp calls, log lines) can pick it
         # up via _current_request_id().
         _request_id_ctx.set(_uuid.uuid4().hex)
+        _t0 = time.monotonic()
         mail_from: str = envelope.mail_from or ""
         rcpt_tos: list[str] = envelope.rcpt_tos
         raw_content: bytes = envelope.content if isinstance(envelope.content, bytes) else envelope.content.encode()
@@ -863,7 +896,9 @@ class SafeSenderHandler:
                     subject_hash=subject_hash,
                     matched_rule_id=None,
                     outcome="allowed",
-                )
+                
+                processing_ms=int((time.monotonic() - _t0) * 1000),
+            )
                 logger.info("Test connection accepted", extra={"domain": domain})
                 return "250 OK"
             if data and not test_token_valid:
@@ -958,8 +993,47 @@ class SafeSenderHandler:
                 subject_hash=subject_hash,
                 matched_rule_id=matched_rule["id"],
                 outcome="blocked",
+            
+                processing_ms=int((time.monotonic() - _t0) * 1000),
             )
             return "550 5.7.1 Message rejected: policy violation"
+
+        # --- AI scan (async, runs after keyword rules pass) ---
+        ai_result = None
+        ai_enabled = data.get("ai_scan_enabled", False)
+        ai_policies_list = data.get("ai_policies", [])
+        if ai_enabled and ai_policies_list:
+            try:
+                import ai_scan as _ai_scan
+                ai_result = await asyncio.to_thread(
+                    _ai_scan.scan_email, subject, body, ai_policies_list
+                )
+                if ai_result:
+                    logger.info(
+                        "AI scan result",
+                        extra={
+                            "decision": ai_result.decision,
+                            "confidence": ai_result.confidence,
+                            "reason": ai_result.reason,
+                        },
+                    )
+                    if ai_result.decision == "flag" and ai_result.confidence >= 70:
+                        await _log_scan(
+                            customer_id=customer_id,
+                            sender=mail_from,
+                            recipient=recipient,
+                            subject_hash=subject_hash,
+                            matched_rule_id=None,
+                            outcome="blocked",
+                            ai_decision=ai_result.decision,
+                            ai_confidence=ai_result.confidence,
+                            ai_reason=ai_result.reason,
+                        
+                processing_ms=int((time.monotonic() - _t0) * 1000),
+            )
+                        return "550 5.7.1 Message rejected: AI compliance policy violation"
+            except Exception as exc:
+                logger.warning("AI scan error — fail open", extra={"error": str(exc)})
 
         # Forward via Mailgun
         # --- Suppression check ---
@@ -973,7 +1047,9 @@ class SafeSenderHandler:
                     subject_hash=subject_hash,
                     matched_rule_id=None,
                     outcome="blocked",
-                )
+                
+                processing_ms=int((time.monotonic() - _t0) * 1000),
+            )
                 return "550 5.1.8 Recipient address suppressed due to prior bounce or complaint"
 
         try:
@@ -997,6 +1073,8 @@ class SafeSenderHandler:
                 subject_hash=subject_hash,
                 matched_rule_id=None,
                 outcome="blocked",
+            
+                processing_ms=int((time.monotonic() - _t0) * 1000),
             )
             return "451 4.3.0 Delivery failure — please retry"
 
@@ -1007,7 +1085,9 @@ class SafeSenderHandler:
             subject_hash=subject_hash,
             matched_rule_id=None,
             outcome="allowed",
-        )
+        
+                processing_ms=int((time.monotonic() - _t0) * 1000),
+            )
         return "250 OK"
 
 

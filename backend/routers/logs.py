@@ -27,6 +27,9 @@ class LogEntry(BaseModel):
     matched_rule_pattern: Optional[str]
     matched_rule_description: Optional[str]
     created_at: datetime
+    ai_decision: Optional[str] = None
+    ai_confidence: Optional[float] = None
+    ai_reason: Optional[str] = None
 
 
 class LogsResponse(BaseModel):
@@ -71,6 +74,9 @@ async def list_logs(
                 matched_rule_pattern=r["matched_rule_pattern"],
                 matched_rule_description=r["matched_rule_description"],
                 created_at=r["created_at"],
+                ai_decision=r["ai_decision"],
+                ai_confidence=r["ai_confidence"],
+                ai_reason=r["ai_reason"],
             )
             for r in page_data.results
         ],
