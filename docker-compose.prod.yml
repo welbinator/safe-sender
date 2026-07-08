@@ -99,7 +99,7 @@ services:
       TLS_KEY_PATH: ${TLS_KEY_PATH}
       PORT25_ALLOWED_CIDRS: ${PORT25_ALLOWED_CIDRS:-}
       OLLAMA_URL: http://host-gateway:11434
-      OLLAMA_MODEL: llama3.2
+      OLLAMA_MODEL: llama3.1:8b
     extra_hosts:
       - "host-gateway:host-gateway"
     cap_drop:
